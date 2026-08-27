@@ -1,0 +1,52 @@
+# --- SECRETOS: nunca deben salir de esta maquina
+escritorio/**/key.properties
+app/android/key.properties
+app/android/*.jks
+app/android/*.keystore
+*.jks
+*.keystore
+credenciales*.json
+*credentials*.json
+
+# --- binarios grandes (ffmpeg pesa mas de lo que GitHub admite)
+bin/
+escritorio/bin/
+servidor/bin/
+*.exe
+*.apk
+*.aab
+*.ipa
+
+# --- resultados de compilacion
+build/
+dist/
+salida/
+.dart_tool/
+.flutter-plugins
+.flutter-plugins-dependencies
+app/build/
+escritorio/build/
+escritorio/dist/
+escritorio/salida/
+*.spec
+
+# --- Python
+__pycache__/
+*.py[cod]
+*.egg-info/
+.venv/
+venv/
+
+# --- datos locales y temporales
+temporal/
+caratulas/
+*.db
+*.log
+*.part
+
+# --- entornos de desarrollo
+.idea/
+.vscode/
+*.iml
+.DS_Store
+Thumbs.db

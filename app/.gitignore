@@ -1,0 +1,11 @@
+# Flutter
+.dart_tool/
+.packages
+build/
+.flutter-plugins
+.flutter-plugins-dependencies
+*.iml
+
+# Claves de firma: NUNCA subir esto a un repositorio
+android/key.properties
+android/caudal.jks

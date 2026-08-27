@@ -1,0 +1,47 @@
+name: caudal
+description: "Descarga musica y videos desde su propio navegador"
+publish_to: 'none'
+version: 1.0.0+1
+
+environment:
+  sdk: ^3.13.0
+
+dependencies:
+  flutter:
+    sdk: flutter
+
+  # red y descargas
+  dio: ^5.7.0
+
+  # navegador integrado
+  webview_flutter: ^4.10.0
+  webview_flutter_android: ^4.3.0
+  webview_flutter_wkwebview: ^3.18.0
+
+  # almacenamiento y permisos
+  path_provider: ^2.1.5
+  permission_handler: ^12.0.0
+  shared_preferences: ^2.3.3
+  sqflite: ^2.4.1
+  path: ^1.9.0
+
+  # reproduccion
+  just_audio: ^0.10.0
+  just_audio_background: ^0.0.1-beta.16
+  video_player: ^2.9.2
+
+  # utilidades de interfaz
+  mobile_scanner: ^7.0.0
+  cached_network_image: ^3.4.1
+  open_filex: ^4.7.0
+  share_plus: ^12.0.0
+  youtube_explode_dart: ^3.1.0
+  ffmpeg_kit_flutter_new: ^4.6.2
+
+dev_dependencies:
+  flutter_test:
+    sdk: flutter
+  flutter_lints: ^6.0.0
+
+flutter:
+  uses-material-design: true

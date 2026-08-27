@@ -1,0 +1,87 @@
+# Compilación de Caudal en la nube (codemagic.io)
+#
+# Sirve para generar la versión de iPhone sin tener un Mac.
+# Sube esta carpeta a un repositorio de GitHub, conecta el repositorio en
+# codemagic.io y elige el flujo que quieras lanzar.
+
+workflows:
+  android:
+    name: Caudal · Android (APK)
+    max_build_duration: 60
+    instance_type: mac_mini_m2
+    environment:
+      flutter: stable
+      java: 17
+    scripts:
+      - name: Dependencias
+        script: flutter pub get
+      - name: Analisis
+        script: flutter analyze --no-fatal-infos
+      - name: Pruebas
+        script: flutter test
+      - name: Compilar APK
+        script: flutter build apk --release
+    artifacts:
+      - build/**/outputs/**/*.apk
+
+  ios:
+    name: Caudal · iPhone (IPA sin firmar)
+    max_build_duration: 90
+    instance_type: mac_mini_m2
+    environment:
+      flutter: stable
+      xcode: latest
+      cocoapods: default
+    scripts:
+      - name: Dependencias
+        script: flutter pub get
+      - name: Instalar pods
+        script: |
+          cd ios
+          pod install
+      - name: Compilar sin firma
+        # Sin cuenta de desarrollador de Apple sale un .app sin firmar:
+        # se instala en el iPhone con Sideloadly o AltStore.
+        script: |
+          flutter build ios --release --no-codesign
+      - name: Empaquetar el .app en un .ipa
+        script: |
+          mkdir -p build/ios/ipa/Payload
+          cp -r build/ios/iphoneos/Runner.app build/ios/ipa/Payload/
+          cd build/ios/ipa
+          zip -r Caudal.ipa Payload
+    artifacts:
+      - build/ios/ipa/*.ipa
+      - build/ios/iphoneos/*.app
+
+  ios_firmado:
+    name: Caudal · iPhone (firmado, requiere cuenta Apple)
+    max_build_duration: 90
+    instance_type: mac_mini_m2
+    environment:
+      flutter: stable
+      xcode: latest
+      cocoapods: default
+      # Configura estas credenciales en Codemagic antes de usar este flujo:
+      #   Teams > Integrations > Apple Developer Portal
+      ios_signing:
+        distribution_type: development
+        bundle_identifier: com.kevinrr.caudal
+    scripts:
+      - name: Dependencias
+        script: flutter pub get
+      - name: Preparar la firma
+        script: |
+          keychain initialize
+          app-store-connect fetch-signing-files "com.kevinrr.caudal" \
+            --type IOS_APP_DEVELOPMENT --create
+          keychain add-certificates
+          xcode-project use-profiles
+      - name: Instalar pods
+        script: |
+          cd ios
+          pod install
+      - name: Compilar
+        script: flutter build ipa --release
+    artifacts:
+      - build/ios/ipa/*.ipa
