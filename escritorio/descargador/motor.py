@@ -226,22 +226,39 @@ class TrabajoAnalisis(QRunnable):
 
             import yt_dlp
 
+            # "ytsearch1:algo" devuelve una lista de un elemento: pedimos que la
+            # resuelva del todo para tratarla como el video que es
+            es_busqueda = str(t.url).startswith("ytsearch")
             opciones = {
                 "quiet": True, "no_warnings": True, "logger": self.registro,
-                "skip_download": True, "noplaylist": not self.ajustes["playlist"],
-                "extract_flat": "in_playlist", "socket_timeout": 25,
-                "ignoreerrors": False, "no_color": True,
+                "skip_download": True,
+                "noplaylist": True if es_busqueda else not self.ajustes["playlist"],
+                "extract_flat": False if es_busqueda else "in_playlist",
+                "socket_timeout": 25, "ignoreerrors": False, "no_color": True,
             }
+            if es_busqueda:
+                opciones["playlist_items"] = "1"
             self._extras_red(opciones)
 
             with yt_dlp.YoutubeDL(opciones) as ydl:
                 info = ydl.extract_info(t.url, download=False)
 
             if info and info.get("_type") == "playlist" and info.get("entries") is not None:
-                entradas = self._entradas_playlist(info)
-                if entradas:
-                    self.senales.playlist.emit(t.ident, entradas, info.get("title") or "Lista")
-                    return
+                if es_busqueda:
+                    # el resultado de la busqueda pasa a ser la tarea
+                    hallados = [e for e in (info.get("entries") or []) if e]
+                    if not hallados:
+                        raise ValueError("La busqueda no encontro ninguna cancion.")
+                    info = hallados[0]
+                    enlace = info.get("webpage_url") or info.get("original_url") or ""
+                    if enlace:
+                        t.url = enlace
+                else:
+                    entradas = self._entradas_playlist(info)
+                    if entradas:
+                        self.senales.playlist.emit(
+                            t.ident, entradas, info.get("title") or "Lista")
+                        return
 
             info = info or {}
             mini = info.get("thumbnail") or ""
@@ -333,6 +350,7 @@ class TrabajoDescarga(QRunnable):
             "progress_hooks": [self._hook],
             "postprocessor_hooks": [self._hook_pp],
             "noplaylist": True,
+            "playlist_items": "1",
             "continuedl": True,
             "retries": int(a["reintentos"]),
             "fragment_retries": int(a["reintentos"]),
@@ -539,11 +557,16 @@ class Gestor(QObject):
         self._trabajos = {}
         self._analisis = {}
 
-    def agregar(self, url, iniciar=True, datos_previos=None, tipo=None, calidad=None):
-        url = redes.normalizar(url)
+    def agregar(self, url, iniciar=True, datos_previos=None, tipo=None, calidad=None,
+                titulo=""):
+        # "ytsearch1:algo" no es una direccion: es una busqueda para yt-dlp
+        if not str(url).startswith("ytsearch"):
+            url = redes.normalizar(url)
         if not url:
             return None
         tarea = Tarea(url=url, tipo_pedido=tipo or "", calidad_pedida=calidad or "")
+        if titulo:
+            tarea.titulo = titulo
         if datos_previos:
             tarea.titulo = datos_previos.get("titulo") or url
             tarea.duracion = datos_previos.get("duracion", 0)

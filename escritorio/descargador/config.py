@@ -60,6 +60,10 @@ DEFECTOS = {
     "sesion_token": "",            # sesion guardada del servidor
     "sesion_usuario": "",
     "mantener_sesion": True,
+    # opcionales y gratuitos (developer.spotify.com): sin ellos Spotify solo
+    # deja leer 50 canciones por lista
+    "spotify_id": "",
+    "spotify_secreto": "",
     "formato_salida": "mp4",
     "formato_audio": "mp3",
     "simultaneas": 2,

@@ -37,7 +37,8 @@ def ruta_ffmpeg() -> str:
     candidatas = [
         raiz() / "bin",
         raiz() / "_internal" / "bin",
-        Path.home() / "DescargadorVideos" / "bin",
+        Path.home() / "Caudal" / "escritorio" / "bin",
+        Path.home() / "DescargadorVideos" / "bin",   # ubicacion anterior
     ]
     for c in candidatas:
         if (c / "ffmpeg.exe").exists() or (c / "ffmpeg").exists():

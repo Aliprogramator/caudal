@@ -20,7 +20,10 @@ from .. import motor, redes
 from ..config import APP_NOMBRE, DEFECTOS, carpeta_datos, ruta_ffmpeg
 from .estilos import C, hoja
 from . import iconos
+from .. import version
+from .actualizador import Buscador, DialogoActualizacion
 from .biblioteca import VistaBiblioteca
+from .dialogo_listas import DialogoListas
 from .navegador import VistaNavegador
 from .panel_caudal import PanelCaudal
 from .reproductor import Reproductor, VistaVideo
@@ -125,6 +128,11 @@ class Ventana(QWidget):
         if not (self.ajustes["sesion_token"] or "").strip():
             QTimer.singleShot(0, lambda: self._ir_a(4))
 
+        # a los pocos segundos, cuando la ventana ya responde, miramos si hay
+        # version nueva; si no la hay el usuario no se entera de nada
+        self.buscador_version = None
+        QTimer.singleShot(6000, lambda: self._buscar_version(True))
+
     # ------------------------------------------------------------ estructura
     SECCIONES = [
         ("Descargas", "descargar"),
@@ -178,6 +186,7 @@ class Ventana(QWidget):
         self.vista_biblioteca.reproducir.connect(self.reproductor.reproducir)
         self.vista_biblioteca.ver_video.connect(self._abrir_video)
         self.vista_biblioteca.aviso.connect(self._aviso_breve)
+        self.vista_biblioteca.traer_lista.connect(self._traer_lista)
         self.vista_navegador.descargar.connect(self._descargar_del_navegador)
         self.reproductor.pidio_video.connect(self._abrir_video)
         self.reproductor.modo_musica_cambiado.connect(self._aviso_modo_musica)
@@ -248,6 +257,54 @@ class Ventana(QWidget):
                 "Encendido.\n\nLo que descargues a partir de ahora se nivela para "
                 "que suene mucho mas fuerte, sin que se rompa el sonido.\n\n"
                 "Lo ya descargado mantiene su volumen.")
+
+    def _traer_lista(self):
+        """Abre el dialogo y encola lo que el usuario elija."""
+        dialogo = DialogoListas(self.ajustes, self)
+        dialogo.descargar.connect(self._encolar_lista)
+        dialogo.exec()
+
+    def _encolar_lista(self, canciones):
+        """Cada cancion se busca en YouTube si no trae enlace propio."""
+        for c in canciones:
+            enlace = c.get("url") or ""
+            if not enlace:
+                consulta = c.get("busqueda") or c.get("titulo") or ""
+                if not consulta:
+                    continue
+                enlace = "ytsearch1:" + consulta
+            nombre = c.get("titulo") or ""
+            if c.get("artista"):
+                nombre = f"{c['artista']} - {nombre}"
+            self.gestor.agregar(enlace, tipo="audio", titulo=nombre)
+        self._aviso_breve(f"{len(canciones)} canciones en la cola")
+        self._ir_a(0)
+
+    def _buscar_version(self, callado):
+        """Mira si hay una version nueva. [callado] = sin avisar si no la hay."""
+        if self.buscador_version and self.buscador_version.isRunning():
+            return
+        if not callado:
+            self.bt_buscar_version.setEnabled(False)
+            self.et_version.setText("Comprobando...")
+
+        self.buscador_version = Buscador()
+        self.buscador_version.resultado.connect(
+            lambda n: self._responder_version(n, callado))
+        self.buscador_version.start()
+
+    def _responder_version(self, novedad, callado):
+        if not callado:
+            self.bt_buscar_version.setEnabled(True)
+        if not novedad:
+            if not callado:
+                self.et_version.setText(
+                    f"Tienes la version {version.VERSION}. Es la mas reciente.")
+            return
+
+        self.et_version.setText(
+            f"Tienes la {version.VERSION}. Hay una nueva: {novedad['version']}")
+        DialogoActualizacion(novedad, self).exec()
 
     def _aviso_breve(self, texto):
         """Mensaje corto en la barra de abajo, sin interrumpir."""
@@ -659,6 +716,25 @@ class Ventana(QWidget):
         cont_m.setLayout(fila_m)
         g6.addWidget(cont_m, 1, 1)
         v.addWidget(p6)
+
+        # --- version
+        p7, g7 = self._panel("VERSION Y ACTUALIZACIONES")
+        self.et_version = QLabel(f"Tienes la version {version.VERSION}")
+        self.et_version.setObjectName("ayuda")
+        self.et_version.setWordWrap(True)
+        g7.addWidget(self.et_version, 0, 1)
+
+        self.bt_buscar_version = QPushButton("  Buscar actualizaciones")
+        self.bt_buscar_version.setIcon(iconos.icono("reintentar", 16))
+        self.bt_buscar_version.setCursor(Qt.PointingHandCursor)
+        self.bt_buscar_version.clicked.connect(lambda: self._buscar_version(False))
+        fila_v = QHBoxLayout()
+        fila_v.addWidget(self.bt_buscar_version)
+        fila_v.addStretch(1)
+        cont_v = QWidget()
+        cont_v.setLayout(fila_v)
+        g7.addWidget(cont_v, 1, 1)
+        v.addWidget(p7)
 
         v.addStretch(1)
         area.setWidget(caja)

@@ -18,7 +18,7 @@ import tempfile
 import urllib.error
 import urllib.request
 
-VERSION = "1.2.0"
+VERSION = "1.3.0"
 
 # usuario/repositorio de GitHub donde publicas las versiones
 ORIGEN = "Aliprogramator/caudal"

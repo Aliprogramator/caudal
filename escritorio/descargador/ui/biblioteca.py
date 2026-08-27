@@ -6,10 +6,12 @@ import subprocess
 import sys
 
 from PySide6.QtCore import Qt, QTimer, Signal
-from PySide6.QtWidgets import (QFrame, QGridLayout, QHBoxLayout, QInputDialog, QLabel,
+from PySide6.QtWidgets import (QApplication, QFrame, QGridLayout, QHBoxLayout,
+                               QInputDialog, QLabel,
                                QLineEdit, QMenu, QMessageBox, QPushButton, QScrollArea,
                                QVBoxLayout, QWidget)
 
+from ..conversion import ErrorConversion, duracion, extraer_audio
 from ..motor import formato_bytes, formato_tiempo
 from .estilos import C
 from . import iconos
@@ -116,6 +118,7 @@ class VistaBiblioteca(QWidget):
     reproducir = Signal(list, int)
     ver_video = Signal(dict)
     aviso = Signal(str)
+    traer_lista = Signal()
 
     def __init__(self, historial, padre=None):
         super().__init__(padre)
@@ -206,6 +209,13 @@ class VistaBiblioteca(QWidget):
         self.bt_reproducir.clicked.connect(
             lambda: self.reproducir.emit(self.elementos, 0) if self.elementos else None)
         fila2.addWidget(self.bt_reproducir)
+
+        self.bt_traer = QPushButton("  Traer lista")
+        self.bt_traer.setIcon(iconos.icono("descargar", 16))
+        self.bt_traer.setToolTip("Traer una lista de Spotify, Apple Music o YouTube Music")
+        self.bt_traer.setCursor(Qt.PointingHandCursor)
+        self.bt_traer.clicked.connect(self.traer_lista.emit)
+        fila2.addWidget(self.bt_traer)
 
         self.bt_nueva = QPushButton("  Nueva lista")
         self.bt_nueva.setIcon(iconos.icono("mas", 16))
@@ -327,6 +337,34 @@ class VistaBiblioteca(QWidget):
         self.aviso.emit(f"Anadido a \"{nombre_final}\"")
         if self.lista_abierta:
             self.refrescar()
+
+    def _extraer_audio(self, fila):
+        """Saca el MP3 de un video que ya esta descargado."""
+        from ..config import Ajustes
+        ajustes = Ajustes()
+        self.aviso.emit("Extrayendo el audio...")
+        QApplication.setOverrideCursor(Qt.WaitCursor)
+        try:
+            destino = extraer_audio(
+                fila.get("archivo", ""),
+                formato=ajustes["formato_audio"],
+                reforzar=bool(ajustes["modo_musica"]),
+            )
+        except ErrorConversion as e:
+            QApplication.restoreOverrideCursor()
+            QMessageBox.warning(self, "Caudal", str(e))
+            self.aviso.emit("")
+            return
+        finally:
+            QApplication.restoreOverrideCursor()
+
+        self.historial.agregar(
+            fila.get("url", ""), fila.get("titulo", ""), fila.get("plataforma", ""),
+            destino, os.path.getsize(destino), duracion(destino),
+            ajustes["formato_audio"].upper(), caratula=fila.get("caratula", ""),
+            es_audio=True, autor=fila.get("autor", ""))
+        self.aviso.emit("Audio extraido y guardado en tu musica")
+        self._cambiar_filtro(True)
 
     def _quitar_de_lista(self, fila):
         if self.lista_abierta:
@@ -450,6 +488,8 @@ class VistaBiblioteca(QWidget):
         menu = QMenu(self)
         menu.addAction("Reproducir", lambda: self._al_pulsar(fila))
         menu.addAction("Anadir a una lista", lambda: self._anadir_a_lista(fila))
+        if not fila.get("es_audio"):
+            menu.addAction("Extraer el audio (MP3)", lambda: self._extraer_audio(fila))
         if self.lista_abierta:
             menu.addAction("Quitar de esta lista", lambda: self._quitar_de_lista(fila))
         menu.addAction("Ver en la carpeta", lambda: self._mostrar(fila))

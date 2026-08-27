@@ -81,8 +81,14 @@ _token_spotify = {"valor": "", "caduca": 0}
 
 def _token_api_spotify(ajustes):
     """Token de la API oficial. Hace falta un ID y un secreto gratuitos."""
-    ident = (ajustes["spotify_id"] or "").strip()
-    secreto = (ajustes["spotify_secreto"] or "").strip()
+    def _valor(clave):
+        try:
+            return (ajustes[clave] or "").strip() if ajustes else ""
+        except (KeyError, TypeError):
+            return ""
+
+    ident = _valor("spotify_id")
+    secreto = _valor("spotify_secreto")
     if not ident or not secreto:
         return ""
 
@@ -370,7 +376,7 @@ def _portada_apple(pagina):
 # ---------------------------------------------------------------- YouTube
 
 def _youtube(url: str, ajustes) -> dict:
-    """YouTube y YouTube Music los lee el motor, sin tope de canciones."""
+    """YouTube y YouTube Music, sin tope de canciones."""
     import yt_dlp
 
     opciones = {
@@ -378,7 +384,10 @@ def _youtube(url: str, ajustes) -> dict:
         "extract_flat": "in_playlist", "socket_timeout": 30, "no_color": True,
         "ignoreerrors": True,
     }
-    nav = ajustes["navegador_cookies"]
+    try:
+        nav = (ajustes["navegador_cookies"] if ajustes else "ninguno") or "ninguno"
+    except (KeyError, TypeError):
+        nav = "ninguno"
     if nav and nav != "ninguno":
         opciones["cookiesfrombrowser"] = (nav,)
 
