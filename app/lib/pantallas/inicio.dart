@@ -134,9 +134,13 @@ void encolarYAvisar(
   String titulo = '',
   String autor = '',
   String miniatura = '',
+  String urlMedia = '',
+  String cookies = '',
 }) {
   gestor.encolar(
     url: url,
+    urlMedia: urlMedia,
+    cookies: cookies,
     tipo: tipo,
     calidad: calidad,
     formatoAudio: formatoAudio,

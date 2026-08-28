@@ -9,6 +9,7 @@ import 'package:permission_handler/permission_handler.dart';
 
 import 'ajustes.dart';
 import 'almacen.dart';
+import 'capturador_oculto.dart';
 import 'extractores.dart';
 import 'formato.dart';
 import 'modelos.dart';
@@ -79,9 +80,13 @@ class GestorDescargas extends ChangeNotifier {
   GestorDescargas({
     required this.almacen,
     required this.ajustes,
+    required this.capturador,
   });
   final Almacen almacen;
   final Ajustes ajustes;
+
+  /// Para abrir la pagina a escondidas cuando el enlace no viene del navegador.
+  final CapturadorOculto capturador;
 
   final List<Descarga> _cola = [];
   final MotorLocal _local = MotorLocal();
@@ -306,23 +311,48 @@ class GestorDescargas extends ChangeNotifier {
     var media = d.urlMedia;
     var titulo = d.titulo;
 
+    var galletas = d.cookies;
+
     if (media.isEmpty) {
-      // leer la pagina no puede eternizarse: si no contesta, se avisa
+      // primero lo barato: a veces la pagina lleva el video en sus etiquetas
       final hallado = await extraer(d.url)
-          .timeout(const Duration(seconds: 45), onTimeout: () => null);
-      if (hallado == null || !hallado.vale) {
-        throw ErrorCaudal(
-          'No se encontro el video en esa pagina. Abrela en el navegador de '
-          'Caudal, dale al play un segundo y descargala desde ahi.',
-        );
+          .timeout(const Duration(seconds: 30), onTimeout: () => null);
+      if (hallado != null && hallado.vale) {
+        media = hallado.url;
+        if (titulo.isEmpty || titulo == sitioDe(d.url)) {
+          if (hallado.titulo.isNotEmpty) titulo = hallado.titulo;
+        }
+        if (d.autor.isEmpty) d.autor = hallado.autor;
+        if (d.miniatura.isEmpty) d.miniatura = hallado.miniatura;
+        if (d.duracion == 0) d.duracion = hallado.duracion;
       }
-      media = hallado.url;
-      if (titulo.isEmpty || titulo == sitioDe(d.url)) {
-        if (hallado.titulo.isNotEmpty) titulo = hallado.titulo;
+    }
+
+    if (media.isEmpty) {
+      // Instagram y TikTok no ponen el video en la pagina: hay que abrirla de
+      // verdad y ver que pide. Se hace en un navegador que no se ve.
+      d.detalle = 'Abriendo la pagina';
+      notifyListeners();
+      final oculta = await capturador
+          .capturar(d.url, paraAudio: d.esAudio)
+          .timeout(const Duration(seconds: 40),
+              onTimeout: () => const CapturaOculta());
+      if (oculta.vale) {
+        media = oculta.url;
+        if (galletas.isEmpty) galletas = oculta.cookies;
+        if ((titulo.isEmpty || titulo == sitioDe(d.url)) &&
+            oculta.titulo.isNotEmpty) {
+          titulo = oculta.titulo;
+        }
       }
-      if (d.autor.isEmpty) d.autor = hallado.autor;
-      if (d.miniatura.isEmpty) d.miniatura = hallado.miniatura;
-      if (d.duracion == 0) d.duracion = hallado.duracion;
+    }
+
+    if (media.isEmpty) {
+      throw ErrorCaudal(
+        'No se encontro el video en esa pagina. Puede que sea privada o que '
+        'haga falta iniciar sesion: abrela en el navegador de Caudal, dale al '
+        'play y descargala desde ahi.',
+      );
     }
 
     final carpeta = await GestorDescargas.carpetaDeGuardado(
@@ -336,7 +366,7 @@ class GestorDescargas extends ChangeNotifier {
         formatoAudio: d.formatoAudio,
         carpeta: carpeta,
         referente: d.url,
-        cookies: d.cookies,
+        cookies: galletas,
         reforzarAudio: d.esAudio && ajustes.modoMusica,
         cancelado: () => d.estado == EstadoDescarga.cancelada || d.pausada,
         alProgresar: _avisarDelAvance(d),

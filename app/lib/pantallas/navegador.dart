@@ -377,10 +377,17 @@ class _VistaNavegadorState extends State<VistaNavegador> with AutomaticKeepAlive
     );
     if (eleccion == null || !mounted) return;
 
+    // lo que vimos pasar en la pagina vale igual desde aqui
+    final media = await _mediaParaDescargar(eleccion.tipo);
+    final galletas = await _cookiesDeLaPagina();
+    if (!mounted) return;
+
     encolarYAvisar(
       context,
       gestor: servicios.descargas,
       url: _urlActual,
+      urlMedia: media,
+      cookies: galletas,
       tipo: eleccion.tipo,
       calidad: eleccion.calidad,
       formatoAudio: eleccion.formatoAudio,
@@ -615,10 +622,15 @@ class _VistaNavegadorState extends State<VistaNavegador> with AutomaticKeepAlive
       ajustes: servicios.ajustes,
     );
     if (eleccion == null || !mounted) return;
+    final galletas = await _cookiesDeLaPagina();
+    if (!mounted) return;
     encolarYAvisar(
       context,
       gestor: servicios.descargas,
-      url: url,
+      url: _urlActual.isEmpty ? url : _urlActual,
+      // aqui la direccion ya es la del archivo: se pasa como tal
+      urlMedia: url,
+      cookies: galletas,
       tipo: eleccion.tipo,
       calidad: eleccion.calidad,
       formatoAudio: eleccion.formatoAudio,
