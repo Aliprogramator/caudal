@@ -200,14 +200,12 @@ class GestorDescargas extends ChangeNotifier {
     try {
       // YouTube se resuelve solo y da la mejor calidad, con el sonido aparte.
       if (MotorLocal.puedeSolo(d.url)) {
-        try {
-          // averiguar el video no deberia tardar tanto: si tarda, algo va mal
-          // y no vale la pena tener el hueco ocupado esperando
-          await _bajarAqui(d).timeout(const Duration(hours: 3));
-          return;
-        } on _SinSoporte {
-          // no se pudo por ahi; probamos como con cualquier otra pagina
-        }
+        // Y solo por ahi: el camino general captura lo que el reproductor va
+        // pidiendo, y en YouTube eso son trozos sueltos que no valen como
+        // archivo. Antes se caia ahi al fallar y se bajaba basura, tapando
+        // ademas el motivo de verdad.
+        await _bajarAqui(d).timeout(const Duration(hours: 3));
+        return;
       }
       await _bajarDeLaPagina(d).timeout(const Duration(hours: 3));
     } on ErrorCaudal catch (e) {
@@ -293,9 +291,36 @@ class GestorDescargas extends ChangeNotifier {
         notifyListeners();
         return;
       }
-      // si por aqui no se pudo, se intenta como con cualquier otra pagina
-      throw _SinSoporte();
+      // el motivo se cuenta tal cual: antes se convertia en _SinSoporte y se
+      // perdia, y encima se seguia por un camino que en YouTube no funciona
+      throw ErrorCaudal(_motivoDeYoutube(e));
     }
+  }
+
+  /// Traduce lo que dice YouTube a algo que el usuario pueda entender.
+  static String _motivoDeYoutube(Object e) {
+    final texto = e.toString();
+    final bajo = texto.toLowerCase();
+
+    if (bajo.contains('age') || bajo.contains('sign in') || bajo.contains('login')) {
+      return 'Ese video tiene restriccion de edad y YouTube pide iniciar '
+          'sesion para verlo. Prueba con otra version del mismo video.';
+    }
+    if (bajo.contains('unavailable') || bajo.contains('not available')) {
+      return 'Ese video ya no esta disponible en YouTube.';
+    }
+    if (bajo.contains('private')) {
+      return 'Ese video es privado.';
+    }
+    if (bajo.contains('live')) {
+      return 'Es una emision en directo: no se puede descargar mientras esta '
+          'en marcha.';
+    }
+    if (bajo.contains('socket') || bajo.contains('connection') ||
+        bajo.contains('timeout') || bajo.contains('host')) {
+      return 'No se pudo hablar con YouTube. Comprueba tu conexion.';
+    }
+    return _mensajeDe(e);
   }
 
   /// Descarga de cualquier otro sitio: Instagram, TikTok, X, Facebook...
@@ -568,5 +593,3 @@ class GestorDescargas extends ChangeNotifier {
   }
 }
 
-/// Marca que por el camino de YouTube no se pudo, y toca el camino general.
-class _SinSoporte implements Exception {}

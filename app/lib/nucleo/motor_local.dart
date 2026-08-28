@@ -20,6 +20,42 @@ class MotorLocal {
 
   final YoutubeExplode _yt = YoutubeExplode();
 
+  /// Con que aplicaciones nos hacemos pasar ante YouTube, y en que orden.
+  ///
+  /// YouTube responde distinto segun quien pregunte, y no siempre contesta al
+  /// mismo. Probado contra videos reales: el de Android sin SDK es el unico
+  /// que sirve los que tienen restriccion de edad, asi que va primero; los
+  /// otros cubren los casos en que ese falla. La television y el navegador
+  /// movil fallan casi siempre, pero de vez en cuando son los unicos que
+  /// contestan, asi que se quedan al final.
+  static final List<YoutubeApiClient> _clientes = [
+    YoutubeApiClient.androidSdkless,
+    YoutubeApiClient.androidVr,
+    YoutubeApiClient.ios,
+    YoutubeApiClient.tv,
+    YoutubeApiClient.mweb,
+  ];
+
+  /// Pide el manifiesto probando con cada cliente hasta que uno conteste.
+  Future<StreamManifest> _manifiesto(VideoId id) async {
+    Object? ultimoFallo;
+    for (final cliente in _clientes) {
+      try {
+        final m = await _yt.videos.streamsClient
+            .getManifest(id, ytClients: [cliente])
+            .timeout(const Duration(seconds: 35));
+        if (m.audioOnly.isNotEmpty || m.muxed.isNotEmpty || m.videoOnly.isNotEmpty) {
+          return m;
+        }
+      } catch (e) {
+        ultimoFallo = e;
+      }
+    }
+    // ninguno contesto: se cuenta lo ultimo que dijo YouTube
+    throw ultimoFallo ??
+        Exception('YouTube no devolvio ninguna pista para ese video.');
+  }
+
   /// ¿Este enlace lo resuelve YouTube por su cuenta, sin mirar la página?
   static bool puedeSolo(String url) {
     final u = url.toLowerCase();
@@ -30,7 +66,7 @@ class MotorLocal {
   /// Datos del video sin descargar nada.
   Future<Ficha> resolver(String url) async {
     final video = await _yt.videos.get(url);
-    final manifiesto = await _yt.videos.streamsClient.getManifest(video.id);
+    final manifiesto = await _manifiesto(video.id);
 
     final alturas = <int>{};
     for (final s in manifiesto.videoOnly) {
@@ -84,7 +120,7 @@ class MotorLocal {
   }) async {
     alProgresar(0, 'Buscando el video');
     final video = await _yt.videos.get(url);
-    final manifiesto = await _yt.videos.streamsClient.getManifest(video.id);
+    final manifiesto = await _manifiesto(video.id);
     final nombre = nombreSeguro(video.title);
 
     if (tipo == TipoMedio.audio) {
@@ -572,6 +608,13 @@ class MotorLocal {
       await salida.flush();
       await salida.close();
       cliente.close();
+
+      // un archivo vacio significa que el servidor corto sin mandar nada:
+      // mejor saberlo aqui que dejar que falle mas adelante sin explicacion
+      if (await destino.length() == 0) {
+        await _borrar(destino);
+        throw Exception('El sitio no envio nada. El enlace puede haber caducado.');
+      }
       alProgresar(hasta, 'Descargando');
     } on _Cancelado {
       rethrow;
