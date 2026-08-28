@@ -122,6 +122,26 @@ class GestorDescargas extends ChangeNotifier {
     return d;
   }
 
+  /// Devuelve el callback de avance de una descarga, con freno.
+  ///
+  /// Sin freno esto avisa a la interfaz por cada trozo que llega: cientos de
+  /// veces por segundo. Repintar tanto deja la pantalla agarrotada y parece
+  /// que la descarga no avanza, justo lo contrario de lo que se busca.
+  void Function(double, String) _avisarDelAvance(Descarga d) {
+    var ultimo = DateTime.fromMillisecondsSinceEpoch(0);
+    return (pct, fase) {
+      d.progreso = pct;
+      d.detalle = fase;
+      final ahora = DateTime.now();
+      // siempre se avisa del final y de los cambios de fase, pase lo que pase
+      final esHito = pct >= 100 || pct <= 0;
+      if (esHito || ahora.difference(ultimo).inMilliseconds >= 250) {
+        ultimo = ahora;
+        notifyListeners();
+      }
+    };
+  }
+
   void _bombear() {
     if (_enMarcha >= _maxSimultaneas) return;
     for (final d in _cola.reversed) {
@@ -138,17 +158,25 @@ class GestorDescargas extends ChangeNotifier {
       // YouTube se resuelve solo y da la mejor calidad, con el sonido aparte.
       if (MotorLocal.puedeSolo(d.url)) {
         try {
-          await _bajarAqui(d);
+          // averiguar el video no deberia tardar tanto: si tarda, algo va mal
+          // y no vale la pena tener el hueco ocupado esperando
+          await _bajarAqui(d).timeout(const Duration(hours: 3));
           return;
         } on _SinSoporte {
           // no se pudo por ahi; probamos como con cualquier otra pagina
         }
       }
-      await _bajarDeLaPagina(d);
+      await _bajarDeLaPagina(d).timeout(const Duration(hours: 3));
     } on ErrorCaudal catch (e) {
       if (!d.pausada && d.estado != EstadoDescarga.cancelada) {
         d.estado = EstadoDescarga.error;
         d.error = e.mensaje;
+        d.detalle = 'Error';
+      }
+    } on TimeoutException {
+      if (!d.pausada && d.estado != EstadoDescarga.cancelada) {
+        d.estado = EstadoDescarga.error;
+        d.error = 'La descarga tardo demasiado y se corto. Vuelve a intentarlo.';
         d.detalle = 'Error';
       }
     } catch (e) {
@@ -182,11 +210,7 @@ class GestorDescargas extends ChangeNotifier {
         carpeta: carpeta,
         reforzarAudio: d.esAudio && ajustes.modoMusica,
         cancelado: () => d.estado == EstadoDescarga.cancelada || d.pausada,
-        alProgresar: (pct, fase) {
-          d.progreso = pct;
-          d.detalle = fase;
-          notifyListeners();
-        },
+        alProgresar: _avisarDelAvance(d),
       );
 
       final tamano = await File(archivo).length();
@@ -243,11 +267,13 @@ class GestorDescargas extends ChangeNotifier {
     var titulo = d.titulo;
 
     if (media.isEmpty) {
-      final hallado = await extraer(d.url);
+      // leer la pagina no puede eternizarse: si no contesta, se avisa
+      final hallado = await extraer(d.url)
+          .timeout(const Duration(seconds: 45), onTimeout: () => null);
       if (hallado == null || !hallado.vale) {
         throw ErrorCaudal(
           'No se encontro el video en esa pagina. Abrela en el navegador de '
-          'Caudal, dale al play y vuelve a intentarlo.',
+          'Caudal, dale al play un segundo y descargala desde ahi.',
         );
       }
       media = hallado.url;
@@ -272,11 +298,7 @@ class GestorDescargas extends ChangeNotifier {
         referente: d.url,
         reforzarAudio: d.esAudio && ajustes.modoMusica,
         cancelado: () => d.estado == EstadoDescarga.cancelada || d.pausada,
-        alProgresar: (pct, fase) {
-          d.progreso = pct;
-          d.detalle = fase;
-          notifyListeners();
-        },
+        alProgresar: _avisarDelAvance(d),
       );
 
       final tamano = await File(archivo).length();

@@ -186,8 +186,14 @@ class MotorLocal {
 
     // YouTube ya no sirve video y audio juntos: hay que unirlos aquí
     alProgresar(90, 'Uniendo imagen y sonido');
-    final ok = await _ffmpeg(
-        '-y -i "${video.path}" -i "${audio.path}" -c copy -shortest "$destino"');
+    final ok = await _ffmpegContando(
+      '-y -i "${video.path}" -i "${audio.path}" -c copy -shortest "$destino"',
+      alProgresar: alProgresar,
+      cancelado: cancelado,
+      desde: 90,
+      hasta: 99,
+      etiqueta: 'Uniendo imagen y sonido',
+    );
     await _borrar(video);
     await _borrar(audio);
     if (!ok) {
@@ -348,7 +354,14 @@ class MotorLocal {
             '${_codecDe(formatoAudio, reforzar: reforzarAudio)}'
         : '-c copy -bsf:a aac_adtstoasc';
 
-    final ok = await _ffmpeg('-y $cabeceras-i "$urlMedia" $salida "$destino"');
+    final ok = await _ffmpegContando(
+      '-y $cabeceras-i "$urlMedia" $salida "$destino"',
+      alProgresar: alProgresar,
+      cancelado: cancelado,
+      desde: 5,
+      hasta: 97,
+      etiqueta: soloAudio ? 'Sacando el audio' : 'Juntando el video',
+    );
     if (cancelado()) {
       await _borrar(File(destino));
       throw _Cancelado();
@@ -362,6 +375,9 @@ class MotorLocal {
   }
 
   /// Trae un archivo por HTTP, avisando del avance.
+  ///
+  /// Con vigilancia: si la conexión se queda muda, la descarga se corta con un
+  /// aviso en vez de quedarse ahí colgada para siempre.
   Future<void> _bajarUrl(
     String url,
     File destino,
@@ -371,44 +387,82 @@ class MotorLocal {
     required double hasta,
     String referente = '',
   }) async {
-    final peticion = await HttpClient().getUrl(Uri.parse(url));
-    peticion.headers.set('User-Agent',
-        'Mozilla/5.0 (Linux; Android 13) AppleWebKit/537.36 (KHTML, like Gecko) '
-        'Chrome/124.0.0.0 Mobile Safari/537.36');
-    if (referente.isNotEmpty) peticion.headers.set('Referer', referente);
-    final respuesta = await peticion.close();
+    final cliente = HttpClient()
+      ..connectionTimeout = const Duration(seconds: 25)
+      ..idleTimeout = const Duration(seconds: 30);
+
+    final HttpClientResponse respuesta;
+    try {
+      final peticion = await cliente
+          .getUrl(Uri.parse(url))
+          .timeout(const Duration(seconds: 30));
+      peticion.headers.set('User-Agent',
+          'Mozilla/5.0 (Linux; Android 13) AppleWebKit/537.36 (KHTML, like Gecko) '
+          'Chrome/124.0.0.0 Mobile Safari/537.36');
+      if (referente.isNotEmpty) peticion.headers.set('Referer', referente);
+      respuesta = await peticion.close().timeout(const Duration(seconds: 40));
+    } on TimeoutException {
+      cliente.close(force: true);
+      throw Exception('El sitio no respondió a tiempo. Vuelve a intentarlo.');
+    }
 
     if (respuesta.statusCode >= 400) {
-      throw Exception('Ese video ya no está disponible (${respuesta.statusCode}).');
+      cliente.close(force: true);
+      throw Exception(
+        respuesta.statusCode == 403
+            ? 'Ese video esta protegido y no se deja bajar directamente.'
+            : 'Ese video ya no esta disponible (${respuesta.statusCode}).',
+      );
     }
 
     final total = respuesta.contentLength;
     var hecho = 0;
+    var ultimoAvance = DateTime.now();
     final salida = destino.openWrite();
+
     try {
-      await for (final trozo in respuesta) {
+      // el timeout del stream salta si pasan 45 s sin que llegue un solo byte
+      await for (final trozo in respuesta.timeout(
+        const Duration(seconds: 45),
+        onTimeout: (sumidero) => sumidero.addError(
+          Exception('La descarga se quedo parada. Comprueba tu conexion.'),
+        ),
+      )) {
         if (cancelado()) {
           await salida.flush();
           await salida.close();
+          cliente.close(force: true);
           await _borrar(destino);
           throw _Cancelado();
         }
         salida.add(trozo);
         hecho += trozo.length;
-        if (total > 0) {
-          alProgresar(desde + (hecho / total) * (hasta - desde), 'Descargando');
+
+        // no avisamos por cada trozo: seria repintar la pantalla cien veces
+        final ahora = DateTime.now();
+        if (ahora.difference(ultimoAvance).inMilliseconds > 200) {
+          ultimoAvance = ahora;
+          alProgresar(
+            total > 0 ? desde + (hecho / total) * (hasta - desde) : desde,
+            total > 0 ? 'Descargando' : 'Descargando  ${_mb(hecho)}',
+          );
         }
       }
       await salida.flush();
       await salida.close();
+      cliente.close();
+      alProgresar(hasta, 'Descargando');
     } on _Cancelado {
       rethrow;
     } catch (e) {
       await salida.close();
+      cliente.close(force: true);
       await _borrar(destino);
       rethrow;
     }
   }
+
+  static String _mb(int bytes) => '${(bytes / 1048576).toStringAsFixed(1)} MB';
 
   static bool _esLista(String url) {
     final u = url.split('?').first.toLowerCase();
@@ -441,6 +495,56 @@ class MotorLocal {
     final sesion = await FFmpegKit.execute(orden);
     final codigo = await sesion.getReturnCode();
     return ReturnCode.isSuccess(codigo);
+  }
+
+  /// Igual que [_ffmpeg], pero contando lo que lleva hecho.
+  ///
+  /// Juntar los trozos de un video largo tarda minutos. Sin esto la barra se
+  /// queda clavada todo ese rato y no hay forma de saber si sigue viva.
+  Future<bool> _ffmpegContando(
+    String orden, {
+    required void Function(double, String) alProgresar,
+    required bool Function() cancelado,
+    required double desde,
+    required double hasta,
+    required String etiqueta,
+    int duracionTotal = 0,
+  }) async {
+    final fin = Completer<bool>();
+    var ultimo = DateTime.fromMillisecondsSinceEpoch(0);
+
+    final sesion = await FFmpegKit.executeAsync(
+      orden,
+      (s) async {
+        final codigo = await s.getReturnCode();
+        if (!fin.isCompleted) fin.complete(ReturnCode.isSuccess(codigo));
+      },
+      null,
+      (estadistica) {
+        final ahora = DateTime.now();
+        if (ahora.difference(ultimo).inMilliseconds < 400) return;
+        ultimo = ahora;
+
+        final segundos = estadistica.getTime() ~/ 1000;
+        if (duracionTotal > 0) {
+          final parte = (segundos / duracionTotal).clamp(0.0, 1.0);
+          alProgresar(desde + parte * (hasta - desde), etiqueta);
+        } else {
+          // sin saber cuánto dura, al menos se ve que avanza
+          alProgresar(desde, '$etiqueta  ${formatoSegundos(segundos)}');
+        }
+      },
+    );
+
+    // si el usuario cancela, se corta ffmpeg en vez de esperar a que acabe
+    while (!fin.isCompleted) {
+      await Future<void>.delayed(const Duration(milliseconds: 400));
+      if (cancelado()) {
+        await FFmpegKit.cancel(sesion.getSessionId());
+        return false;
+      }
+    }
+    return fin.future;
   }
 
   Future<void> _borrar(File f) async {

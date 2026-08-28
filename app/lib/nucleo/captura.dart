@@ -85,6 +85,41 @@ const String guionCaptura = r'''
 })();
 ''';
 
+/// Empuja a la pagina a cargar el video, para que pida sus trozos y podamos
+/// verlos pasar.
+///
+/// En Instagram o TikTok el video no se pide hasta que algo lo reproduce. Si
+/// el usuario le dio a descargar sin haberlo visto, hay que darle un empujon:
+/// se pone en marcha en silencio un instante y se vuelve a dejar como estaba.
+const String guionDespertar = r'''
+(function () {
+  try {
+    var vs = document.querySelectorAll('video');
+    if (!vs.length) {
+      // algunas paginas montan el video solo cuando algo entra en pantalla
+      window.scrollBy(0, 1);
+      window.scrollBy(0, -1);
+      return;
+    }
+    vs.forEach(function (v) {
+      try {
+        var estabaSilenciado = v.muted;
+        var estabaEnPausa = v.paused;
+        v.muted = true;
+        var p = v.play();
+        if (p && p.then) { p.then(function(){}).catch(function(){}); }
+        setTimeout(function () {
+          try {
+            if (estabaEnPausa) v.pause();
+            v.muted = estabaSilenciado;
+          } catch (e) {}
+        }, 1400);
+      } catch (e) {}
+    });
+  } catch (e) {}
+})();
+''';
+
 /// Una direccion de media que se vio pasar por la pagina.
 class MedioCapturado {
   MedioCapturado(this.url, this.origen);

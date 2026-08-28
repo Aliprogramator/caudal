@@ -56,6 +56,8 @@ class _VistaNavegadorState extends State<VistaNavegador> with AutomaticKeepAlive
   String _urlDeLaFicha = '';
   int _peticion = 0;
   Timer? _retardo;
+  Timer? _reinyeccion;
+  bool _buscandoMedia = false;
 
   @override
   bool get wantKeepAlive => true;
@@ -90,7 +92,7 @@ class _VistaNavegadorState extends State<VistaNavegador> with AutomaticKeepAlive
           final t = await _web.getTitle();
           if (mounted) setState(() => _titulo = t ?? '');
           _vigilarRuta();
-          _web.runJavaScript(guionCaptura);
+          _insistirConLaCaptura();
           _buscarMedios();
         },
         onWebResourceError: (e) {
@@ -104,6 +106,7 @@ class _VistaNavegadorState extends State<VistaNavegador> with AutomaticKeepAlive
   @override
   void dispose() {
     _retardo?.cancel();
+    _reinyeccion?.cancel();
     _direccion.dispose();
     _focoDireccion.dispose();
     super.dispose();
@@ -192,6 +195,24 @@ class _VistaNavegadorState extends State<VistaNavegador> with AutomaticKeepAlive
     }
   }
 
+  /// Vuelve a plantar el guión de captura varias veces seguidas.
+  ///
+  /// Una sola inyección no basta: según cuándo entre, la página todavía no ha
+  /// terminado de montarse y el enganche se pierde. Insistir unos segundos
+  /// cuesta nada y es la diferencia entre ver pasar el video o no verlo.
+  void _insistirConLaCaptura() {
+    _reinyeccion?.cancel();
+    var veces = 0;
+    _web.runJavaScript(guionCaptura);
+    _reinyeccion = Timer.periodic(const Duration(milliseconds: 900), (t) {
+      if (!mounted || ++veces > 8) {
+        t.cancel();
+        return;
+      }
+      _web.runJavaScript(guionCaptura);
+    });
+  }
+
   /// Pregunta a la página qué videos o audios tiene cargados.
   void _buscarMedios() {
     _web.runJavaScript('''
@@ -246,23 +267,60 @@ class _VistaNavegadorState extends State<VistaNavegador> with AutomaticKeepAlive
   // ---------------------------------------------------------------- descargas
 
   /// Descarga sin preguntar nada: la mejor calidad que haya.
-  /// La mejor direccion de las que vimos pasar mientras la pagina reproducia.
+  /// La mejor dirección de las que vimos pasar mientras la página reproducía.
   ///
-  /// Para YouTube se devuelve vacia a proposito: alli el motor resuelve el
+  /// Para YouTube se devuelve vacía a propósito: allí el motor resuelve el
   /// video entero y saca mejor calidad que lo que sirve el reproductor web.
-  String _mediaParaDescargar(TipoMedio tipo) {
+  ///
+  /// Si todavía no hemos visto pasar nada, se empuja al video a arrancar y se
+  /// espera un momento: casi siempre con eso aparece.
+  Future<String> _mediaParaDescargar(TipoMedio tipo) async {
     if (MotorLocal.puedeSolo(_urlActual)) return '';
-    final mejor = mejorCapturado(_mediosDetectados, paraAudio: tipo == TipoMedio.audio);
-    return mejor?.url ?? '';
+
+    var mejor = mejorCapturado(_mediosDetectados, paraAudio: tipo == TipoMedio.audio);
+    if (mejor != null) return mejor.url;
+
+    // nada capturado: le damos un empujón al reproductor y esperamos
+    await _web.runJavaScript(guionCaptura);
+    await _web.runJavaScript(guionDespertar);
+
+    for (var intento = 0; intento < 12; intento++) {
+      await Future<void>.delayed(const Duration(milliseconds: 400));
+      if (!mounted) return '';
+      mejor = mejorCapturado(_mediosDetectados, paraAudio: tipo == TipoMedio.audio);
+      if (mejor != null) return mejor.url;
+      // cada tanto, otro repaso por si el video acaba de aparecer
+      if (intento == 5) _buscarMedios();
+    }
+    return '';
   }
 
-  void _descargarDirecto(TipoMedio tipo) {
+  Future<void> _descargarDirecto(TipoMedio tipo) async {
     final servicios = Servicios.de(context);
-    if (_urlActual.isEmpty) return;
+    if (_urlActual.isEmpty || _buscandoMedia) return;
+
+    final esYoutube = MotorLocal.puedeSolo(_urlActual);
+    if (!esYoutube && _mediosDetectados.isEmpty) {
+      setState(() => _buscandoMedia = true);
+      avisar(context, 'Buscando el video en la pagina...');
+    }
+
+    final media = await _mediaParaDescargar(tipo);
+    if (!mounted) return;
+    setState(() => _buscandoMedia = false);
+
+    if (!esYoutube && media.isEmpty) {
+      avisar(
+        context,
+        'No se encontro el video. Dale al play un segundo y vuelve a intentarlo.',
+        esError: true,
+      );
+      return;
+    }
 
     servicios.descargas.encolar(
       url: _urlActual,
-      urlMedia: _mediaParaDescargar(tipo),
+      urlMedia: media,
       tipo: tipo,
       calidad: 'mejor',
       formatoAudio: servicios.ajustes.formatoAudio,
