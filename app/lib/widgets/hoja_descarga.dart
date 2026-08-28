@@ -1,9 +1,9 @@
 import 'package:flutter/material.dart';
 
 import '../nucleo/ajustes.dart';
+import '../nucleo/descargas.dart';
 import '../nucleo/formato.dart';
 import '../nucleo/modelos.dart';
-import '../nucleo/servidor.dart';
 import '../nucleo/tema.dart';
 import 'comunes.dart';
 
@@ -24,13 +24,13 @@ class EleccionDescarga {
 
 /// Hoja inferior para elegir qué descargar de un enlace.
 ///
-/// Resuelve el enlace en el servidor mientras se muestra, así el usuario ve
-/// enseguida de qué video se trata y qué calidades hay de verdad.
+/// Mira de qué va el enlace mientras se muestra, así el usuario ve enseguida
+/// de qué video se trata y qué calidades hay de verdad.
 Future<EleccionDescarga?> mostrarHojaDescarga(
   BuildContext context, {
   required String url,
-  required Servidor servidor,
   required Ajustes ajustes,
+  required GestorDescargas descargas,
   Ficha? fichaConocida,
 }) {
   return showModalBottomSheet<EleccionDescarga>(
@@ -39,8 +39,8 @@ Future<EleccionDescarga?> mostrarHojaDescarga(
     backgroundColor: Tono.superficie,
     builder: (_) => _HojaDescarga(
       url: url,
-      servidor: servidor,
       ajustes: ajustes,
+      descargas: descargas,
       fichaConocida: fichaConocida,
     ),
   );
@@ -49,14 +49,14 @@ Future<EleccionDescarga?> mostrarHojaDescarga(
 class _HojaDescarga extends StatefulWidget {
   const _HojaDescarga({
     required this.url,
-    required this.servidor,
     required this.ajustes,
+    required this.descargas,
     this.fichaConocida,
   });
 
   final String url;
-  final Servidor servidor;
   final Ajustes ajustes;
+  final GestorDescargas descargas;
   final Ficha? fichaConocida;
 
   @override
@@ -87,13 +87,15 @@ class _HojaDescargaState extends State<_HojaDescarga> {
       return;
     }
     try {
-      final ficha = await widget.servidor.resolver(widget.url);
+      final ficha = await widget.descargas.resolverSiPuede(widget.url);
       if (!mounted) return;
       setState(() {
         _ficha = ficha;
         _cargando = false;
         // si el enlace no trae imagen, solo tiene sentido bajar el audio
-        if (!ficha.tieneVideo && ficha.tieneAudio) _tipo = TipoMedio.audio;
+        if (ficha != null && !ficha.tieneVideo && ficha.tieneAudio) {
+          _tipo = TipoMedio.audio;
+        }
       });
     } on ErrorCaudal catch (e) {
       if (!mounted) return;

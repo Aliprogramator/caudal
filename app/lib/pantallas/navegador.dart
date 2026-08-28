@@ -5,10 +5,11 @@ import 'package:flutter/material.dart';
 import 'package:webview_flutter/webview_flutter.dart';
 
 import '../main.dart';
+import '../nucleo/captura.dart';
 import '../nucleo/deteccion.dart';
 import '../nucleo/formato.dart';
 import '../nucleo/modelos.dart';
-import '../nucleo/servidor.dart';
+import '../nucleo/motor_local.dart';
 import '../nucleo/tema.dart';
 import '../widgets/barra_rapida.dart';
 import '../widgets/comunes.dart';
@@ -46,7 +47,7 @@ class _VistaNavegadorState extends State<VistaNavegador> with AutomaticKeepAlive
   int _progreso = 0;
   bool _cargando = false;
   bool _arrancado = false;
-  final Set<String> _mediosDetectados = {};
+  final List<MedioCapturado> _mediosDetectados = [];
 
   // --- barra de descarga rápida
   Ficha? _ficha;
@@ -79,6 +80,8 @@ class _VistaNavegadorState extends State<VistaNavegador> with AutomaticKeepAlive
             _cargando = true;
             _mediosDetectados.clear();
           });
+          // cuanto antes se enganche, mas peticiones de video vemos pasar
+          _web.runJavaScript(guionCaptura);
           _cambiarUrl(url);
         },
         onPageFinished: (url) async {
@@ -87,6 +90,7 @@ class _VistaNavegadorState extends State<VistaNavegador> with AutomaticKeepAlive
           final t = await _web.getTitle();
           if (mounted) setState(() => _titulo = t ?? '');
           _vigilarRuta();
+          _web.runJavaScript(guionCaptura);
           _buscarMedios();
         },
         onWebResourceError: (e) {
@@ -152,16 +156,14 @@ class _VistaNavegadorState extends State<VistaNavegador> with AutomaticKeepAlive
     _programarResolucion();
   }
 
-  /// Pregunta al servidor de qué va la página, con un respiro para no
-  /// disparar una consulta por cada rebote de navegación.
+  /// Mira de qué va la página, con un respiro para no disparar una consulta
+  /// por cada rebote de navegación.
   void _programarResolucion() {
     _retardo?.cancel();
     if (!pareceDescargable(_urlActual)) {
       setState(() => _resolviendo = false);
       return;
     }
-    if (!Servicios.de(context).ajustes.conSesion) return;
-
     setState(() => _resolviendo = true);
     _retardo = Timer(const Duration(milliseconds: 700), _resolver);
   }
@@ -170,19 +172,21 @@ class _VistaNavegadorState extends State<VistaNavegador> with AutomaticKeepAlive
     final url = _urlActual;
     final mio = ++_peticion;
     try {
-      final ficha = await Servicios.de(context).servidor.resolver(url);
-      // si mientras tanto el usuario cambió de video, esta respuesta ya no sirve
+      // YouTube da titulo, autor y calidades de verdad; el resto de sitios se
+      // resuelven con lo que el navegador ya sabe de la pagina
+      final ficha = await Servicios.de(context).descargas.resolverSiPuede(url);
       if (!mounted || mio != _peticion || url != _urlActual) return;
       setState(() {
-        _ficha = ficha.esLista ? null : ficha;
+        _ficha = ficha ?? Ficha(url: url, titulo: _titulo, plataforma: sitioDe(url));
         _urlDeLaFicha = url;
         _resolviendo = false;
       });
-    } on ErrorCaudal {
+    } catch (_) {
       if (!mounted || mio != _peticion) return;
-      // no se puede: la barra se queda fuera y no molestamos con un error
+      // sin datos, pero la barra sigue: el video se baja igual con lo capturado
       setState(() {
-        _ficha = null;
+        _ficha = Ficha(url: url, titulo: _titulo, plataforma: sitioDe(url));
+        _urlDeLaFicha = url;
         _resolviendo = false;
       });
     }
@@ -206,9 +210,28 @@ class _VistaNavegadorState extends State<VistaNavegador> with AutomaticKeepAlive
 
   void _mediosEncontrados(JavaScriptMessage mensaje) {
     try {
-      final lista = (jsonDecode(mensaje.message) as List).cast<String>();
+      final datos = jsonDecode(mensaje.message);
       if (!mounted) return;
-      setState(() => _mediosDetectados.addAll(lista.where((u) => u.startsWith('http'))));
+
+      // el guion nuevo manda un objeto por medio; el repaso del DOM, una lista
+      final nuevos = <MedioCapturado>[];
+      if (datos is Map) {
+        final u = (datos['url'] ?? '').toString();
+        if (u.startsWith('http')) {
+          nuevos.add(MedioCapturado(u, (datos['origen'] ?? '').toString()));
+        }
+      } else if (datos is List) {
+        for (final x in datos) {
+          final u = x.toString();
+          if (u.startsWith('http')) nuevos.add(MedioCapturado(u, 'dom'));
+        }
+      }
+      if (nuevos.isEmpty) return;
+
+      final yaEstan = _mediosDetectados.map((m) => m.url).toSet();
+      setState(() {
+        _mediosDetectados.addAll(nuevos.where((m) => !yaEstan.contains(m.url)));
+      });
     } catch (_) {
       // si la pagina devuelve algo raro, seguimos sin medios detectados
     }
@@ -223,16 +246,23 @@ class _VistaNavegadorState extends State<VistaNavegador> with AutomaticKeepAlive
   // ---------------------------------------------------------------- descargas
 
   /// Descarga sin preguntar nada: la mejor calidad que haya.
+  /// La mejor direccion de las que vimos pasar mientras la pagina reproducia.
+  ///
+  /// Para YouTube se devuelve vacia a proposito: alli el motor resuelve el
+  /// video entero y saca mejor calidad que lo que sirve el reproductor web.
+  String _mediaParaDescargar(TipoMedio tipo) {
+    if (MotorLocal.puedeSolo(_urlActual)) return '';
+    final mejor = mejorCapturado(_mediosDetectados, paraAudio: tipo == TipoMedio.audio);
+    return mejor?.url ?? '';
+  }
+
   void _descargarDirecto(TipoMedio tipo) {
     final servicios = Servicios.de(context);
-    if (!servicios.ajustes.conSesion) {
-      avisar(context, 'Primero conecta la app con tu servidor', esError: true);
-      return;
-    }
     if (_urlActual.isEmpty) return;
 
     servicios.descargas.encolar(
       url: _urlActual,
+      urlMedia: _mediaParaDescargar(tipo),
       tipo: tipo,
       calidad: 'mejor',
       formatoAudio: servicios.ajustes.formatoAudio,
@@ -251,16 +281,12 @@ class _VistaNavegadorState extends State<VistaNavegador> with AutomaticKeepAlive
 
   Future<void> _abrirOpciones() async {
     final servicios = Servicios.de(context);
-    if (!servicios.ajustes.conSesion) {
-      avisar(context, 'Primero conecta la app con tu servidor', esError: true);
-      return;
-    }
     if (_urlActual.isEmpty) return;
 
     final eleccion = await mostrarHojaDescarga(
       context,
       url: _urlActual,
-      servidor: servicios.servidor,
+      descargas: servicios.descargas,
       ajustes: servicios.ajustes,
       fichaConocida: _ficha,
     );
@@ -459,21 +485,30 @@ class _VistaNavegadorState extends State<VistaNavegador> with AutomaticKeepAlive
                 children: [
                   for (final medio in _mediosDetectados)
                     ListTile(
-                      leading: const Icon(Icons.movie_outlined, color: Tono.acento),
+                      leading: Icon(
+                        medio.esSoloAudio
+                            ? Icons.music_note_rounded
+                            : Icons.movie_outlined,
+                        color: Tono.acento,
+                      ),
                       title: Text(
-                        Uri.parse(medio).pathSegments.isEmpty
-                            ? medio
-                            : Uri.parse(medio).pathSegments.last,
+                        Uri.parse(medio.url).pathSegments.isEmpty
+                            ? medio.url
+                            : Uri.parse(medio.url).pathSegments.last,
                         maxLines: 1,
                         overflow: TextOverflow.ellipsis,
                         style: const TextStyle(fontSize: 14),
                       ),
-                      subtitle: Text(sitioDe(medio),
-                          style: Theme.of(context).textTheme.bodySmall),
+                      subtitle: Text(
+                        medio.esLista
+                            ? '${sitioDe(medio.url)} · por trozos'
+                            : sitioDe(medio.url),
+                        style: Theme.of(context).textTheme.bodySmall,
+                      ),
                       trailing: const Icon(Icons.download_rounded, size: 20),
                       onTap: () {
                         Navigator.of(context).pop();
-                        _descargarMedioDirecto(medio);
+                        _descargarMedioDirecto(medio.url);
                       },
                     ),
                 ],
@@ -491,7 +526,7 @@ class _VistaNavegadorState extends State<VistaNavegador> with AutomaticKeepAlive
     final eleccion = await mostrarHojaDescarga(
       context,
       url: url,
-      servidor: servicios.servidor,
+      descargas: servicios.descargas,
       ajustes: servicios.ajustes,
     );
     if (eleccion == null || !mounted) return;

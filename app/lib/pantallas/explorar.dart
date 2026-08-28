@@ -4,13 +4,11 @@ import 'package:flutter/services.dart';
 import '../main.dart';
 import '../nucleo/formato.dart';
 import '../nucleo/modelos.dart';
-import '../nucleo/servidor.dart';
 import '../nucleo/tema.dart';
 import '../widgets/comunes.dart';
 import '../widgets/hoja_descarga.dart';
 import 'ajustes_vista.dart';
 import 'listas_vista.dart';
-import 'acceso.dart';
 import 'inicio.dart';
 
 /// Pantalla principal: buscar música por nombre o pegar un enlace.
@@ -42,10 +40,6 @@ class _VistaExplorarState extends State<VistaExplorar> {
     if (entrada.isEmpty) return;
 
     final servicios = Servicios.de(context);
-    if (!servicios.ajustes.conSesion) {
-      _pedirConexion();
-      return;
-    }
 
     _foco.unfocus();
 
@@ -61,17 +55,17 @@ class _VistaExplorarState extends State<VistaExplorar> {
     });
 
     try {
-      final res = await servicios.servidor.buscar(entrada);
+      final res = await servicios.descargas.buscar(entrada);
       if (!mounted) return;
       setState(() {
         _resultados = res;
         _buscando = false;
       });
       servicios.ajustes.recordarBusqueda(entrada);
-    } on ErrorCaudal catch (e) {
+    } catch (e) {
       if (!mounted) return;
       setState(() {
-        _error = e.mensaje;
+        _error = 'No se pudo buscar. Comprueba tu conexion.';
         _buscando = false;
         _resultados = [];
       });
@@ -83,7 +77,7 @@ class _VistaExplorarState extends State<VistaExplorar> {
     final eleccion = await mostrarHojaDescarga(
       context,
       url: url,
-      servidor: servicios.servidor,
+      descargas: servicios.descargas,
       ajustes: servicios.ajustes,
     );
     if (eleccion == null || !mounted) return;
@@ -117,11 +111,6 @@ class _VistaExplorarState extends State<VistaExplorar> {
     if (pareceEnlace(texto)) _enviar(texto);
   }
 
-  void _pedirConexion() {
-    Navigator.of(context).push(
-      MaterialPageRoute(builder: (_) => const PantallaAcceso()),
-    );
-  }
 
   @override
   Widget build(BuildContext context) {
@@ -133,15 +122,12 @@ class _VistaExplorarState extends State<VistaExplorar> {
         child: ListenableBuilder(
           listenable: servicios.ajustes,
           builder: (context, _) {
-            final conSesion = servicios.ajustes.conSesion;
             return CustomScrollView(
               keyboardDismissBehavior: ScrollViewKeyboardDismissBehavior.onDrag,
               slivers: [
                 SliverToBoxAdapter(child: _cabecera()),
                 SliverToBoxAdapter(child: _buscador()),
-                if (!conSesion)
-                  SliverToBoxAdapter(child: _tarjetaConectar())
-                else if (_error.isNotEmpty)
+                if (_error.isNotEmpty)
                   SliverToBoxAdapter(
                     child: Padding(
                       padding: const EdgeInsets.all(Medidas.margen),
@@ -295,44 +281,6 @@ class _VistaExplorarState extends State<VistaExplorar> {
     );
   }
 
-  Widget _tarjetaConectar() {
-    return Padding(
-      padding: const EdgeInsets.all(Medidas.margen),
-      child: Container(
-        padding: const EdgeInsets.all(20),
-        decoration: BoxDecoration(
-          gradient: Tono.gradienteSuave,
-          borderRadius: BorderRadius.circular(Medidas.radioGrande),
-          border: Border.all(color: Tono.acento.withValues(alpha: 0.28)),
-        ),
-        child: Column(
-          crossAxisAlignment: CrossAxisAlignment.start,
-          children: [
-            Row(
-              children: [
-                const Icon(Icons.link_rounded, color: Tono.acento, size: 22),
-                const SizedBox(width: 10),
-                Text('Conecta con tu servidor',
-                    style: Theme.of(context).textTheme.titleMedium),
-              ],
-            ),
-            const SizedBox(height: 10),
-            Text(
-              'Caudal usa el servidor que corre en tu computadora para resolver los '
-              'enlaces. Enciéndelo y escanea el código QR que aparece en pantalla.',
-              style: Theme.of(context).textTheme.bodyMedium,
-            ),
-            const SizedBox(height: 16),
-            BotonPrincipal(
-              texto: 'Escanear código QR',
-              icono: Icons.qr_code_scanner_rounded,
-              alPulsar: _pedirConexion,
-            ),
-          ],
-        ),
-      ),
-    );
-  }
 
   Widget _sugerencias() {
     final recientes = Servicios.de(context).ajustes.busquedas;

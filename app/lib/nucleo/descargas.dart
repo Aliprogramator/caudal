@@ -9,15 +9,15 @@ import 'package:permission_handler/permission_handler.dart';
 
 import 'ajustes.dart';
 import 'almacen.dart';
+import 'extractores.dart';
 import 'formato.dart';
 import 'modelos.dart';
 import 'motor_local.dart';
-import 'servidor.dart';
 
 /// Una descarga vista desde el teléfono.
 ///
-/// Pasa por dos fases: el servidor la prepara (baja y convierte) y después el
-/// teléfono se trae el archivo. El progreso que ve el usuario junta las dos.
+/// Todo ocurre aquí dentro: se busca la dirección del video, se trae el
+/// archivo y, si hace falta, se convierte. Nada pasa por ningún servidor.
 class Descarga {
   Descarga({
     required this.id,
@@ -29,10 +29,15 @@ class Descarga {
     this.titulo = '',
     this.autor = '',
     this.miniatura = '',
+    this.urlMedia = '',
   });
 
   final String id;
   final String url;
+
+  /// Direccion del archivo en si, cuando el navegador la vio pasar mientras la
+  /// pagina reproducia el video. Vacia para YouTube, que se resuelve solo.
+  final String urlMedia;
 
   /// Texto a buscar cuando no hay enlace exacto (canciones de Spotify o Apple).
   final String busqueda;
@@ -53,8 +58,6 @@ class Descarga {
   double velocidad = 0;
   int segundosRestantes = 0;
   int duracion = 0;
-
-  String idTrabajo = '';
   String archivo = '';
   CancelToken? cancelador;
   bool pausada = false;
@@ -69,17 +72,13 @@ class Descarga {
 /// Cola de descargas del teléfono.
 class GestorDescargas extends ChangeNotifier {
   GestorDescargas({
-    required this.servidor,
     required this.almacen,
     required this.ajustes,
   });
-
-  final Servidor servidor;
   final Almacen almacen;
   final Ajustes ajustes;
 
   final List<Descarga> _cola = [];
-  final Dio _dio = Dio();
   final MotorLocal _local = MotorLocal();
   int _enMarcha = 0;
   int _contador = 0;
@@ -103,10 +102,12 @@ class GestorDescargas extends ChangeNotifier {
     String titulo = '',
     String autor = '',
     String miniatura = '',
+    String urlMedia = '',
   }) {
     final d = Descarga(
       id: 'd${++_contador}_${DateTime.now().millisecondsSinceEpoch}',
       url: url,
+      urlMedia: urlMedia,
       busqueda: busqueda,
       tipo: tipo,
       calidad: calidad,
@@ -134,19 +135,16 @@ class GestorDescargas extends ChangeNotifier {
   Future<void> _procesar(Descarga d) async {
     _enMarcha++;
     try {
-      // Lo que el telefono puede resolver por su cuenta se baja directo de la
-      // fuente: asi el archivo no pasa por el servidor ni depende de el.
-      if (ajustes.descargaDirecta && MotorLocal.puedeSolo(d.url)) {
+      // YouTube se resuelve solo y da la mejor calidad, con el sonido aparte.
+      if (MotorLocal.puedeSolo(d.url)) {
         try {
           await _bajarAqui(d);
           return;
         } on _SinSoporte {
-          // seguimos por el servidor
+          // no se pudo por ahi; probamos como con cualquier otra pagina
         }
       }
-      await _prepararEnServidor(d);
-      if (d.estado == EstadoDescarga.cancelada || d.pausada) return;
-      await _traerArchivo(d);
+      await _bajarDeLaPagina(d);
     } on ErrorCaudal catch (e) {
       if (!d.pausada && d.estado != EstadoDescarga.cancelada) {
         d.estado = EstadoDescarga.error;
@@ -166,7 +164,7 @@ class GestorDescargas extends ChangeNotifier {
     }
   }
 
-  /// Descarga sin servidor: el telefono resuelve y baja de la fuente.
+  /// YouTube: el telefono resuelve el video y lo baja de la fuente.
   Future<void> _bajarAqui(Descarga d) async {
     d.estado = EstadoDescarga.descargando;
     d.detalle = 'Preparando';
@@ -226,186 +224,101 @@ class GestorDescargas extends ChangeNotifier {
         notifyListeners();
         return;
       }
-      // si aqui no se pudo, que lo intente el servidor
+      // si por aqui no se pudo, se intenta como con cualquier otra pagina
       throw _SinSoporte();
     }
   }
 
-  /// Fase 1: el servidor busca, descarga y convierte. Ocupa el 0-45 % del avance.
-  Future<void> _prepararEnServidor(Descarga d) async {
-    d.estado = EstadoDescarga.preparando;
-    d.detalle = 'Pidiendo al servidor';
-    notifyListeners();
-
-    if (d.idTrabajo.isEmpty) {
-      final trabajo = await servidor.crearTrabajo(
-        url: d.url,
-        busqueda: d.busqueda,
-        tipo: d.tipo,
-        calidad: d.calidad,
-        formatoAudio: d.formatoAudio,
-        // el modo musica solo tiene sentido cuando lo que se baja es sonido
-        refuerzoAudio: d.esAudio && ajustes.modoMusica,
-      );
-      d.idTrabajo = trabajo.id;
-    }
-
-    while (true) {
-      if (d.pausada || d.estado == EstadoDescarga.cancelada) return;
-      await Future<void>.delayed(const Duration(milliseconds: 1200));
-      if (d.pausada || d.estado == EstadoDescarga.cancelada) return;
-
-      final estado = await servidor.verTrabajo(d.idTrabajo);
-      if (estado.titulo.isNotEmpty) d.titulo = estado.titulo;
-      if (estado.autor.isNotEmpty) d.autor = estado.autor;
-      if (estado.miniatura.isNotEmpty && d.miniatura.isEmpty) d.miniatura = estado.miniatura;
-      if (estado.duracion > 0) d.duracion = estado.duracion;
-
-      d.progreso = estado.progreso * 0.45;
-      d.detalle = estado.mensaje;
-      notifyListeners();
-
-      if (estado.listo) {
-        d.bytesTotales = estado.tamano;
-        if (estado.nombre.isNotEmpty) d.titulo = p.basenameWithoutExtension(estado.nombre);
-        d.archivo = await _rutaDestino(estado.nombre, d.esAudio);
-        return;
-      }
-      if (estado.fallo) {
-        throw ErrorCaudal(estado.error.isEmpty ? 'El servidor no pudo prepararlo.' : estado.error);
-      }
-      if (estado.cancelado) {
-        d.estado = EstadoDescarga.cancelada;
-        d.detalle = 'Cancelada';
-        return;
-      }
-    }
-  }
-
-  /// Fase 2: traer el archivo al teléfono. Ocupa el 45-100 % del avance.
-  Future<void> _traerArchivo(Descarga d) async {
+  /// Descarga de cualquier otro sitio: Instagram, TikTok, X, Facebook...
+  ///
+  /// Se usa la direccion que el navegador vio pasar mientras la pagina
+  /// reproducia el video. Si no hay ninguna (porque la descarga se pidio
+  /// desde fuera del navegador), se intenta leerla de la propia pagina.
+  Future<void> _bajarDeLaPagina(Descarga d) async {
     d.estado = EstadoDescarga.descargando;
-    d.detalle = 'Trayendo al teléfono';
+    d.detalle = 'Buscando el video';
     notifyListeners();
 
-    final parcial = File('${d.archivo}.part');
-    var yaTiene = await parcial.exists() ? await parcial.length() : 0;
+    var media = d.urlMedia;
+    var titulo = d.titulo;
 
-    d.cancelador = CancelToken();
-    final cabeceras = Map<String, String>.from(servidor.cabeceras);
-    if (yaTiene > 0) cabeceras['Range'] = 'bytes=$yaTiene-';
-
-    final respuesta = await _dio.get<ResponseBody>(
-      servidor.urlArchivo(d.idTrabajo),
-      options: Options(
-        headers: cabeceras,
-        responseType: ResponseType.stream,
-        receiveTimeout: const Duration(minutes: 10),
-        followRedirects: true,
-      ),
-      cancelToken: d.cancelador,
-    );
-
-    // si el servidor ignoró el Range, hay que empezar de cero
-    if (respuesta.statusCode == 200 && yaTiene > 0) {
-      yaTiene = 0;
-      if (await parcial.exists()) await parcial.delete();
+    if (media.isEmpty) {
+      final hallado = await extraer(d.url);
+      if (hallado == null || !hallado.vale) {
+        throw ErrorCaudal(
+          'No se encontro el video en esa pagina. Abrela en el navegador de '
+          'Caudal, dale al play y vuelve a intentarlo.',
+        );
+      }
+      media = hallado.url;
+      if (titulo.isEmpty || titulo == sitioDe(d.url)) {
+        if (hallado.titulo.isNotEmpty) titulo = hallado.titulo;
+      }
+      if (d.autor.isEmpty) d.autor = hallado.autor;
+      if (d.miniatura.isEmpty) d.miniatura = hallado.miniatura;
+      if (d.duracion == 0) d.duracion = hallado.duracion;
     }
 
-    final largoCabecera =
-        int.tryParse('${respuesta.headers.value(Headers.contentLengthHeader) ?? 0}') ?? 0;
-    final total = yaTiene + largoCabecera;
-    if (total > 0) d.bytesTotales = total;
-
-    final salida = parcial.openWrite(mode: yaTiene > 0 ? FileMode.append : FileMode.write);
-    var recibidos = yaTiene;
-    final inicio = DateTime.now();
-    var ultimoAviso = DateTime.now();
+    final carpeta = await GestorDescargas.carpetaDeGuardado(
+        d.esAudio, ajustes.guardarEnPublico);
 
     try {
-      await for (final trozo in respuesta.data!.stream) {
-        if (d.pausada || d.estado == EstadoDescarga.cancelada) {
-          await salida.flush();
-          await salida.close();
-          if (d.estado == EstadoDescarga.cancelada) {
-            if (await parcial.exists()) await parcial.delete();
-          } else {
-            d.estado = EstadoDescarga.pausada;
-            d.detalle = 'En pausa';
-            d.bytesRecibidos = recibidos;
-            notifyListeners();
-          }
-          return;
-        }
-
-        salida.add(trozo);
-        recibidos += trozo.length;
-
-        final ahora = DateTime.now();
-        if (ahora.difference(ultimoAviso).inMilliseconds > 220) {
-          ultimoAviso = ahora;
-          final transcurrido = ahora.difference(inicio).inMilliseconds / 1000.0;
-          d.bytesRecibidos = recibidos;
-          d.velocidad = transcurrido > 0 ? (recibidos - yaTiene) / transcurrido : 0;
-          if (d.bytesTotales > 0) {
-            d.progreso = 45 + (recibidos / d.bytesTotales) * 55;
-            if (d.velocidad > 0) {
-              d.segundosRestantes = ((d.bytesTotales - recibidos) / d.velocidad).round();
-            }
-          }
+      final archivo = await _local.descargarMedio(
+        urlMedia: media,
+        titulo: titulo,
+        tipo: d.tipo,
+        formatoAudio: d.formatoAudio,
+        carpeta: carpeta,
+        referente: d.url,
+        reforzarAudio: d.esAudio && ajustes.modoMusica,
+        cancelado: () => d.estado == EstadoDescarga.cancelada || d.pausada,
+        alProgresar: (pct, fase) {
+          d.progreso = pct;
+          d.detalle = fase;
           notifyListeners();
-        }
-      }
+        },
+      );
 
-      await salida.flush();
-      await salida.close();
+      final tamano = await File(archivo).length();
+      d.archivo = archivo;
+      d.titulo = titulo;
+      d.bytesRecibidos = tamano;
+      d.bytesTotales = tamano;
+      d.progreso = 100;
+      d.estado = EstadoDescarga.completada;
+      d.detalle = 'Guardado en el telefono';
+
+      await almacen.guardar(Pista(
+        id: 0,
+        titulo: d.titulo,
+        autor: d.autor,
+        archivo: archivo,
+        miniatura: d.miniatura,
+        duracion: d.duracion,
+        tamano: tamano,
+        origen: d.url,
+        esAudio: d.esAudio,
+        fecha: DateTime.now().millisecondsSinceEpoch,
+      ));
+
+      notifyListeners();
+      if (!_terminadas.isClosed) _terminadas.add(d);
     } catch (e) {
-      await salida.flush();
-      await salida.close();
-      // solo un DioException puede ser una cancelación; el cast a ciegas rompía
-      if (e is DioException && CancelToken.isCancel(e)) {
-        if (d.estado == EstadoDescarga.cancelada) {
-          if (await parcial.exists()) await parcial.delete();
-        } else {
-          d.estado = EstadoDescarga.pausada;
-          d.detalle = 'En pausa';
-          notifyListeners();
-        }
+      if (d.estado == EstadoDescarga.cancelada) {
+        d.detalle = 'Cancelada';
+        notifyListeners();
+        return;
+      }
+      if (d.pausada) {
+        d.estado = EstadoDescarga.pausada;
+        d.detalle = 'En pausa';
+        notifyListeners();
         return;
       }
       rethrow;
     }
-
-    await parcial.rename(d.archivo);
-
-    final tamanoFinal = await File(d.archivo).length();
-    d.bytesRecibidos = tamanoFinal;
-    d.bytesTotales = tamanoFinal;
-    d.progreso = 100;
-    d.estado = EstadoDescarga.completada;
-    d.detalle = 'Guardado';
-    d.velocidad = 0;
-    d.segundosRestantes = 0;
-
-    await almacen.guardar(Pista(
-      id: 0,
-      titulo: d.titulo,
-      autor: d.autor,
-      archivo: d.archivo,
-      miniatura: d.miniatura,
-      duracion: d.duracion,
-      tamano: tamanoFinal,
-      origen: d.url,
-      esAudio: d.esAudio,
-      fecha: DateTime.now().millisecondsSinceEpoch,
-    ));
-
-    // el servidor ya no necesita guardar el archivo
-    unawaited(servidor.cancelarTrabajo(d.idTrabajo));
-
-    notifyListeners();
-    if (!_terminadas.isClosed) _terminadas.add(d);
   }
+
 
   // ---------------------------------------------------------------- control
 
@@ -429,14 +342,10 @@ class GestorDescargas extends ChangeNotifier {
         d.estado != EstadoDescarga.cancelada) {
       return;
     }
-    final veniaDeCancelada = d.estado == EstadoDescarga.cancelada;
     d.pausada = false;
     d.error = '';
     d.estado = EstadoDescarga.enCola;
     d.detalle = 'En cola';
-    // al cancelar se le pide al servidor que borre el trabajo, así que
-    // reintentar tiene que empezar pidiéndolo otra vez desde cero
-    if (veniaDeCancelada) d.idTrabajo = '';
     notifyListeners();
     _bombear();
   }
@@ -448,9 +357,6 @@ class GestorDescargas extends ChangeNotifier {
     d.detalle = 'Cancelada';
     d.pausada = false;
     d.cancelador?.cancel('cancelada');
-    if (d.idTrabajo.isNotEmpty) {
-      unawaited(servidor.cancelarTrabajo(d.idTrabajo));
-    }
     final parcial = File('${d.archivo}.part');
     if (d.archivo.isNotEmpty && await parcial.exists()) {
       try {
@@ -500,21 +406,6 @@ class GestorDescargas extends ChangeNotifier {
   // ---------------------------------------------------------------- archivos
 
   /// Dónde se guarda: en la carpeta pública si se puede, si no en la de la app.
-  Future<String> _rutaDestino(String nombreServidor, bool audio) async {
-    final carpeta = await carpetaDeGuardado(audio, ajustes.guardarEnPublico);
-    final nombre = nombreSeguro(p.basenameWithoutExtension(nombreServidor));
-    final extension = p.extension(nombreServidor).isEmpty
-        ? (audio ? '.mp3' : '.mp4')
-        : p.extension(nombreServidor);
-
-    var destino = p.join(carpeta.path, '$nombre$extension');
-    var n = 1;
-    while (await File(destino).exists()) {
-      destino = p.join(carpeta.path, '$nombre ($n)$extension');
-      n++;
-    }
-    return destino;
-  }
 
   static Future<Directory> carpetaDeGuardado(bool audio, bool preferirPublico) async {
     final sub = audio ? 'Musica' : 'Videos';
@@ -556,6 +447,9 @@ class GestorDescargas extends ChangeNotifier {
   }
 
   /// Datos de un enlace, resueltos aqui mismo si se puede.
+  /// Busca canciones y videos en YouTube, desde el propio telefono.
+  Future<List<Resultado>> buscar(String texto) => _local.buscar(texto);
+
   Future<Ficha?> resolverSiPuede(String url) async {
     if (!ajustes.descargaDirecta || !MotorLocal.puedeSolo(url)) return null;
     try {
@@ -573,5 +467,5 @@ class GestorDescargas extends ChangeNotifier {
   }
 }
 
-/// Marca que el telefono no pudo con esa descarga y hay que pedirsela al servidor.
+/// Marca que por el camino de YouTube no se pudo, y toca el camino general.
 class _SinSoporte implements Exception {}

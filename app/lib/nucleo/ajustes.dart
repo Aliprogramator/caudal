@@ -14,60 +14,8 @@ class Ajustes extends ChangeNotifier {
     return Ajustes._(prefs);
   }
 
-  // ---- conexión con el servidor
-  /// Dirección dentro de casa (rápida).
-  String get servidorLocal => _prefs.getString('servidor_local') ?? '';
-
-  /// Dirección para usarlo desde la calle.
-  String get servidorPublico => _prefs.getString('servidor_publico') ?? '';
-
-  bool get hayServidor => servidorLocal.isNotEmpty || servidorPublico.isNotEmpty;
-
-  Future<void> guardarDirecciones(String local, String publico) async {
-    await _prefs.setString('servidor_local', local);
-    await _prefs.setString('servidor_publico', publico);
-    notifyListeners();
-  }
-
-  // ---- sesión
-  String get token => _prefs.getString('token') ?? '';
-  String get usuario => _prefs.getString('usuario') ?? '';
-  String get nombre => _prefs.getString('nombre') ?? '';
-
-  /// Hay sesión iniciada y sitio al que conectarse.
-  bool get conSesion => hayServidor && token.isNotEmpty;
-
-  /// Recordar la sesión entre aperturas de la app.
-  bool get mantenerSesion => _prefs.getBool('mantener_sesion') ?? true;
-
-  Future<void> definirMantenerSesion(bool v) async {
-    await _prefs.setBool('mantener_sesion', v);
-    notifyListeners();
-  }
-
-  Future<void> guardarSesion({
-    required String token,
-    required String usuario,
-    required String nombre,
-  }) async {
-    await _prefs.setString('token', token);
-    await _prefs.setString('usuario', usuario);
-    await _prefs.setString('nombre', nombre);
-    notifyListeners();
-  }
-
-  Future<void> cerrarSesion() async {
-    await _prefs.remove('token');
-    await _prefs.remove('usuario');
-    await _prefs.remove('nombre');
-    notifyListeners();
-  }
-
-  Future<void> olvidarServidor() async {
-    await _prefs.remove('servidor_local');
-    await _prefs.remove('servidor_publico');
-    await cerrarSesion();
-  }
+  // Caudal no se conecta a ningun servidor: todo lo que se descarga se queda
+  // en este telefono. Aqui solo viven las preferencias del usuario.
 
   // ---- preferencias de descarga
   TipoMedio get tipoPorDefecto =>

@@ -5,9 +5,7 @@ import 'package:just_audio_background/just_audio_background.dart';
 import 'nucleo/ajustes.dart';
 import 'nucleo/almacen.dart';
 import 'nucleo/descargas.dart';
-import 'nucleo/servidor.dart';
 import 'nucleo/tema.dart';
-import 'pantallas/acceso.dart';
 import 'pantallas/inicio.dart';
 import 'reproduccion/reproductor_audio.dart';
 
@@ -33,28 +31,15 @@ Future<void> main() async {
 
   final ajustes = await Ajustes.abrir();
 
-  // si no pidió que le recordaran, la sesión no sobrevive al cierre
-  if (!ajustes.mantenerSesion) {
-    await ajustes.cerrarSesion();
-  }
   final almacen = await Almacen.abrir();
-  final servidor = Servidor(
-    local: ajustes.servidorLocal,
-    publica: ajustes.servidorPublico,
-    token: ajustes.token,
-  );
-  final descargas = GestorDescargas(servidor: servidor, almacen: almacen, ajustes: ajustes);
+  final descargas = GestorDescargas(almacen: almacen, ajustes: ajustes);
   final audio = ReproductorAudio();
   await audio.definirModoMusica(ajustes.modoMusica,
       refuerzo: ajustes.refuerzoReproductor);
 
-  // si el servidor rechaza la sesion, el telefono la olvida y pide entrar de nuevo
-  servidor.alCaducarSesion.listen((_) => ajustes.cerrarSesion());
-
   runApp(CaudalApp(
     ajustes: ajustes,
     almacen: almacen,
-    servidor: servidor,
     descargas: descargas,
     audio: audio,
   ));
@@ -66,7 +51,6 @@ class Servicios extends InheritedWidget {
     super.key,
     required this.ajustes,
     required this.almacen,
-    required this.servidor,
     required this.descargas,
     required this.audio,
     required super.child,
@@ -74,7 +58,6 @@ class Servicios extends InheritedWidget {
 
   final Ajustes ajustes;
   final Almacen almacen;
-  final Servidor servidor;
   final GestorDescargas descargas;
   final ReproductorAudio audio;
 
@@ -88,23 +71,16 @@ class Servicios extends InheritedWidget {
   bool updateShouldNotify(Servicios anterior) => false;
 }
 
-/// Decide qué se ve al abrir: la cuenta si no hay sesión, o la app si la hay.
+/// Al abrir se entra directo a la app.
+///
+/// No hay cuenta que crear ni nada que conectar: Caudal descarga dentro del
+/// propio telefono, asi que no tiene sentido pedirle nada al usuario antes de
+/// dejarle usarlo.
 class _Puerta extends StatelessWidget {
   const _Puerta();
 
   @override
-  Widget build(BuildContext context) {
-    final ajustes = Servicios.de(context).ajustes;
-    return ListenableBuilder(
-      listenable: ajustes,
-      builder: (context, _) {
-        if (!ajustes.conSesion) {
-          return const PantallaAcceso(comoPuerta: true);
-        }
-        return const PantallaInicio();
-      },
-    );
-  }
+  Widget build(BuildContext context) => const PantallaInicio();
 }
 
 class CaudalApp extends StatelessWidget {
@@ -112,14 +88,12 @@ class CaudalApp extends StatelessWidget {
     super.key,
     required this.ajustes,
     required this.almacen,
-    required this.servidor,
     required this.descargas,
     required this.audio,
   });
 
   final Ajustes ajustes;
   final Almacen almacen;
-  final Servidor servidor;
   final GestorDescargas descargas;
   final ReproductorAudio audio;
 
@@ -128,7 +102,6 @@ class CaudalApp extends StatelessWidget {
     return Servicios(
       ajustes: ajustes,
       almacen: almacen,
-      servidor: servidor,
       descargas: descargas,
       audio: audio,
       child: MaterialApp(

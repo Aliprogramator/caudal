@@ -3,8 +3,8 @@ import 'package:flutter/services.dart';
 
 import '../main.dart';
 import '../nucleo/formato.dart';
+import '../nucleo/listas.dart';
 import '../nucleo/modelos.dart';
-import '../nucleo/servidor.dart';
 import '../nucleo/tema.dart';
 import '../widgets/comunes.dart';
 import 'inicio.dart';
@@ -43,7 +43,7 @@ class _VistaListasState extends State<VistaListas> {
     });
 
     try {
-      final lista = await Servicios.de(context).servidor.leerLista(url);
+      final lista = await leerLista(url);
       if (!mounted) return;
       setState(() {
         _lista = lista;

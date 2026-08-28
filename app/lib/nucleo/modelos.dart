@@ -1,6 +1,17 @@
 /// Modelos de datos de Caudal.
 library;
 
+/// Un fallo que se le puede contar al usuario tal cual, con sus palabras.
+class ErrorCaudal implements Exception {
+  ErrorCaudal(this.mensaje, {this.esDeConexion = false});
+
+  final String mensaje;
+  final bool esDeConexion;
+
+  @override
+  String toString() => mensaje;
+}
+
 /// Qué se descarga de un enlace.
 enum TipoMedio { completo, video, audio }
 

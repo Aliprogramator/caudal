@@ -5,12 +5,10 @@ import '../nucleo/ajustes.dart';
 import '../nucleo/descargas.dart';
 import '../nucleo/formato.dart';
 import '../nucleo/modelos.dart';
-import '../nucleo/servidor.dart';
 import '../nucleo/tema.dart';
 import '../nucleo/version.dart';
 import '../widgets/comunes.dart';
 import '../widgets/hoja_version.dart';
-import 'acceso.dart';
 
 /// Ajustes de la app, cuenta y estado de la conexión.
 class VistaAjustes extends StatefulWidget {
@@ -21,16 +19,12 @@ class VistaAjustes extends StatefulWidget {
 }
 
 class _VistaAjustesState extends State<VistaAjustes> {
-  String _estado = '';
-  bool _comprobando = false;
-  List<Dispositivo> _dispositivos = const [];
   Map<String, int> _resumen = const {};
 
   @override
   void initState() {
     super.initState();
     WidgetsBinding.instance.addPostFrameCallback((_) {
-      _mirarCuenta();
       _cargarResumen();
     });
   }
@@ -40,87 +34,9 @@ class _VistaAjustesState extends State<VistaAjustes> {
     if (mounted) setState(() => _resumen = r);
   }
 
-  Future<void> _mirarCuenta() async {
-    final servicios = Servicios.de(context);
-    if (!servicios.ajustes.conSesion) {
-      setState(() {
-        _estado = '';
-        _dispositivos = const [];
-      });
-      return;
-    }
-    setState(() => _comprobando = true);
-    try {
-      final datos = await servicios.servidor.miCuenta();
-      if (!mounted) return;
-      setState(() {
-        _estado = 'Conectado';
-        _dispositivos = datos.dispositivos;
-      });
-    } on ErrorCaudal catch (e) {
-      if (!mounted) return;
-      setState(() {
-        _estado = e.mensaje;
-        _dispositivos = const [];
-      });
-    } finally {
-      if (mounted) setState(() => _comprobando = false);
-    }
-  }
 
-  Future<void> _entrar() async {
-    final ok = await Navigator.of(context).push<bool>(
-      MaterialPageRoute(builder: (_) => const PantallaAcceso()),
-    );
-    if (ok == true) _mirarCuenta();
-  }
 
-  Future<void> _salir() async {
-    final confirmar = await showDialog<bool>(
-      context: context,
-      builder: (_) => AlertDialog(
-        title: const Text('Cerrar sesión'),
-        content: const Text(
-          'Este teléfono dejará de estar vinculado a tu cuenta. Lo descargado '
-          'se queda donde está.',
-        ),
-        actions: [
-          TextButton(
-            onPressed: () => Navigator.of(context).pop(false),
-            child: const Text('Cancelar'),
-          ),
-          TextButton(
-            onPressed: () => Navigator.of(context).pop(true),
-            style: TextButton.styleFrom(foregroundColor: Tono.error),
-            child: const Text('Cerrar sesión'),
-          ),
-        ],
-      ),
-    );
-    if (confirmar != true || !mounted) return;
 
-    final servicios = Servicios.de(context);
-    await servicios.servidor.salir();
-    await servicios.ajustes.cerrarSesion();
-    if (mounted) {
-      setState(() {
-        _estado = '';
-        _dispositivos = const [];
-      });
-    }
-  }
-
-  Future<void> _desvincular(Dispositivo d) async {
-    final servicios = Servicios.de(context);
-    try {
-      await servicios.servidor.desvincular(d.id);
-      if (!mounted) return;
-      avisar(context, '${d.nombre} ya no tiene acceso');
-      _mirarCuenta();
-    } on ErrorCaudal catch (e) {
-      if (mounted) avisar(context, e.mensaje, esError: true);
-    }
-  }
 
   @override
   Widget build(BuildContext context) {
@@ -136,8 +52,6 @@ class _VistaAjustesState extends State<VistaAjustes> {
           return ListView(
             padding: const EdgeInsets.fromLTRB(Medidas.margen, 4, Medidas.margen, 30),
             children: [
-              _seccion('Tu cuenta'),
-              _tarjetaCuenta(a),
 
               _seccion('Modo música'),
               _tarjetaModoMusica(a, servicios),
@@ -302,140 +216,6 @@ class _VistaAjustesState extends State<VistaAjustes> {
     });
     if (novedad != null) await mostrarHojaVersion(context, novedad);
   }
-
-  Widget _tarjetaCuenta(Ajustes a) {
-    if (!a.conSesion) {
-      return Container(
-        padding: const EdgeInsets.all(18),
-        decoration: BoxDecoration(
-          gradient: Tono.gradienteSuave,
-          borderRadius: BorderRadius.circular(Medidas.radio),
-          border: Border.all(color: Tono.acento.withValues(alpha: 0.28)),
-        ),
-        child: Column(
-          crossAxisAlignment: CrossAxisAlignment.start,
-          children: [
-            Text('Sin sesión iniciada', style: Theme.of(context).textTheme.titleMedium),
-            const SizedBox(height: 6),
-            Text(
-              'Entra con tu cuenta para buscar y descargar desde este teléfono.',
-              style: Theme.of(context).textTheme.bodyMedium,
-            ),
-            const SizedBox(height: 16),
-            BotonPrincipal(
-              texto: 'Conectar y entrar',
-              icono: Icons.login_rounded,
-              alPulsar: _entrar,
-            ),
-          ],
-        ),
-      );
-    }
-
-    final conectado = _estado == 'Conectado';
-    return _tarjeta([
-      ListTile(
-        leading: Container(
-          width: 42,
-          height: 42,
-          decoration: BoxDecoration(
-            gradient: Tono.gradiente,
-            borderRadius: BorderRadius.circular(13),
-          ),
-          child: Center(
-            child: Text(
-              (a.nombre.isNotEmpty ? a.nombre : a.usuario).characters.first.toUpperCase(),
-              style: const TextStyle(
-                color: Color(0xFF04202A),
-                fontSize: 19,
-                fontWeight: FontWeight.w800,
-              ),
-            ),
-          ),
-        ),
-        title: Text(a.nombre.isNotEmpty ? a.nombre : a.usuario,
-            style: const TextStyle(fontWeight: FontWeight.w600)),
-        subtitle: Row(
-          children: [
-            Container(
-              width: 7,
-              height: 7,
-              margin: const EdgeInsets.only(right: 6),
-              decoration: BoxDecoration(
-                color: _comprobando ? Tono.aviso : (conectado ? Tono.exito : Tono.error),
-                shape: BoxShape.circle,
-              ),
-            ),
-            Expanded(
-              child: Text(
-                _comprobando ? 'Comprobando...' : (conectado ? '@${a.usuario}' : _estado),
-                maxLines: 1,
-                overflow: TextOverflow.ellipsis,
-                style: Theme.of(context).textTheme.bodySmall,
-              ),
-            ),
-          ],
-        ),
-        trailing: IconButton(
-          onPressed: _comprobando ? null : _mirarCuenta,
-          icon: const Icon(Icons.refresh_rounded, size: 19),
-          color: Tono.texto3,
-        ),
-      ),
-      if (_dispositivos.isNotEmpty) ...[
-        const Divider(height: 1),
-        Padding(
-          padding: const EdgeInsets.fromLTRB(16, 12, 16, 4),
-          child: Row(
-            children: [
-              const Icon(Icons.devices_rounded, size: 16, color: Tono.texto3),
-              const SizedBox(width: 8),
-              Text('Dispositivos con tu cuenta',
-                  style: Theme.of(context).textTheme.bodySmall),
-            ],
-          ),
-        ),
-        for (final d in _dispositivos)
-          ListTile(
-            dense: true,
-            leading: Icon(
-              d.plataforma == 'windows' ? Icons.computer_rounded : Icons.smartphone_rounded,
-              size: 19,
-              color: d.esEste ? Tono.acento : Tono.texto3,
-            ),
-            title: Text(
-              d.nombre + (d.esEste ? '  ·  este' : ''),
-              style: TextStyle(
-                fontSize: 13.5,
-                fontWeight: d.esEste ? FontWeight.w600 : FontWeight.w400,
-              ),
-            ),
-            subtitle: Text(
-              d.ultimoUso > 0
-                  ? 'Última vez ${formatoFecha((d.ultimoUso * 1000).round())}'
-                  : '',
-              style: Theme.of(context).textTheme.bodySmall,
-            ),
-            trailing: d.esEste
-                ? null
-                : IconButton(
-                    onPressed: () => _desvincular(d),
-                    icon: const Icon(Icons.link_off_rounded, size: 18),
-                    color: Tono.texto3,
-                    tooltip: 'Quitar acceso',
-                  ),
-          ),
-      ],
-      const Divider(height: 1),
-      ListTile(
-        leading: const Icon(Icons.logout_rounded, color: Tono.error),
-        title: const Text('Cerrar sesión', style: TextStyle(color: Tono.error)),
-        onTap: _salir,
-      ),
-    ]);
-  }
-
-  // ---------------------------------------------------------------- música
 
   Widget _tarjetaModoMusica(Ajustes a, Servicios servicios) {
     return _tarjeta([
