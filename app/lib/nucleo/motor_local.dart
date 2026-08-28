@@ -122,13 +122,15 @@ class MotorLocal {
 
     alProgresar(85, 'Convirtiendo a ${formatoAudio.toUpperCase()}');
     final destino = _libre(carpeta, nombre, formatoAudio);
-    final filtro = reforzar ? '-af loudnorm=I=-9:TP=-1.0:LRA=9 ' : '';
-    final calidad = formatoAudio == 'mp3' ? '-b:a 192k ' : '';
-    final ok = await _ffmpeg(
-        '-y -i "${crudo.path}" $filtro$calidad-vn "$destino"');
+    final ok = await _ffmpeg([
+      '-y', '-i', crudo.path,
+      if (reforzar) ...['-af', 'loudnorm=I=-9:TP=-1.0:LRA=9'],
+      if (formatoAudio == 'mp3') ...['-b:a', '192k'],
+      '-vn', destino,
+    ]);
     await _borrar(crudo);
     if (!ok) {
-      throw Exception('No se pudo convertir el audio en el teléfono.');
+      throw Exception('No se pudo convertir el audio.  $_porQueFalloFfmpeg');
     }
     alProgresar(100, 'Listo');
     return destino;
@@ -172,9 +174,12 @@ class MotorLocal {
 
     if (soloImagen) {
       alProgresar(85, 'Preparando el archivo');
-      final ok = await _ffmpeg('-y -i "${video.path}" -c copy -an "$destino"');
+      final ok = await _ffmpeg(
+          ['-y', '-i', video.path, '-c', 'copy', '-an', destino]);
       await _borrar(video);
-      if (!ok) throw Exception('No se pudo preparar el video en el teléfono.');
+      if (!ok) {
+        throw Exception('No se pudo preparar el video.  $_porQueFalloFfmpeg');
+      }
       alProgresar(100, 'Listo');
       return destino;
     }
@@ -187,7 +192,7 @@ class MotorLocal {
     // YouTube ya no sirve video y audio juntos: hay que unirlos aquí
     alProgresar(90, 'Uniendo imagen y sonido');
     final ok = await _ffmpegContando(
-      '-y -i "${video.path}" -i "${audio.path}" -c copy -shortest "$destino"',
+      ['-y', '-i', video.path, '-i', audio.path, '-c', 'copy', '-shortest', destino],
       alProgresar: alProgresar,
       cancelado: cancelado,
       desde: 90,
@@ -197,7 +202,7 @@ class MotorLocal {
     await _borrar(video);
     await _borrar(audio);
     if (!ok) {
-      throw Exception('No se pudo unir el video con su audio en el teléfono.');
+      throw Exception('No se pudo unir el video con su audio.  $_porQueFalloFfmpeg');
     }
 
     alProgresar(100, 'Listo');
@@ -306,9 +311,44 @@ class MotorLocal {
     ));
 
     alProgresar(0, 'Descargando');
-    await _bajarUrl(urlMedia, temporal, alProgresar, cancelado,
-        desde: 0, hasta: soloAudio ? 70 : 96,
-        referente: referente, cookies: cookies);
+
+    // Cada sitio es quisquilloso con cosas distintas: unos exigen las cookies,
+    // otros rechazan la peticion justo por llevarlas. Se prueban las
+    // combinaciones en vez de rendirse al primer no.
+    final intentos = <Map<String, String>>[
+      {'referente': referente, 'cookies': cookies},
+      if (cookies.isNotEmpty) {'referente': referente, 'cookies': ''},
+      if (referente.isNotEmpty) {'referente': '', 'cookies': cookies},
+      {'referente': '', 'cookies': ''},
+    ];
+
+    Object? ultimoFallo;
+    var bajado = false;
+    for (final intento in intentos) {
+      try {
+        await _bajarUrl(urlMedia, temporal, alProgresar, cancelado,
+            desde: 0, hasta: soloAudio ? 70 : 96,
+            referente: intento['referente'] ?? '',
+            cookies: intento['cookies'] ?? '');
+        bajado = true;
+        break;
+      } on _Cancelado {
+        rethrow;
+      } catch (e) {
+        ultimoFallo = e;
+        // solo tiene sentido reintentar si nos dieron con la puerta en las
+        // narices; si no hay internet, insistir no arregla nada
+        final texto = e.toString().toLowerCase();
+        final valeLaPena = texto.contains('403') ||
+            texto.contains('401') ||
+            texto.contains('protegido') ||
+            texto.contains('disponible');
+        if (!valeLaPena) rethrow;
+      }
+    }
+    if (!bajado) {
+      throw ultimoFallo ?? Exception('No se pudo traer ese video.');
+    }
 
     // video tal cual: ya está
     if (!soloAudio) {
@@ -321,14 +361,23 @@ class MotorLocal {
     // solo sonido: se saca del archivo que acabamos de bajar
     alProgresar(72, 'Sacando el audio');
     final destino = _libre(carpeta, nombre, formatoAudio);
-    final filtro = reforzarAudio ? '-af loudnorm=I=-9:TP=-1.0:LRA=9 ' : '';
-    final codec = _codecDe(formatoAudio, reforzar: reforzarAudio);
-    final ok = await _ffmpeg(
-      '-y -i "${temporal.path}" -vn $filtro$codec "$destino"',
-    );
+    var ok = await _ffmpeg([
+      '-y', '-i', temporal.path, '-vn',
+      if (reforzarAudio) ...['-af', 'loudnorm=I=-9:TP=-1.0:LRA=9'],
+      ..._codecDe(formatoAudio, reforzar: reforzarAudio),
+      destino,
+    ]);
+
+    // copiar la pista tal cual falla si el contenedor no la admite: en ese
+    // caso se rehace, que tarda algo mas pero siempre sale
+    if (!ok && formatoAudio == 'm4a' && !reforzarAudio) {
+      ok = await _ffmpeg([
+        '-y', '-i', temporal.path, '-vn', '-c:a', 'aac', '-b:a', '192k', destino,
+      ]);
+    }
     await _borrar(temporal);
     if (!ok) {
-      throw Exception('No se pudo sacar el audio de ese video.');
+      throw Exception('No se pudo sacar el audio de ese video.  $_porQueFalloFfmpeg');
     }
     alProgresar(100, 'Listo');
     return destino;
@@ -350,29 +399,59 @@ class MotorLocal {
     alProgresar(5, 'Juntando el video');
     final destino = _libre(carpeta, nombre, soloAudio ? formatoAudio : 'mp4');
 
-    final cabeceras = referente.isEmpty
-        ? ''
-        : '-headers "Referer: $referente\r\n" ';
-    final salida = soloAudio
-        ? '-vn ${reforzarAudio ? '-af loudnorm=I=-9:TP=-1.0:LRA=9 ' : ''}'
-            '${_codecDe(formatoAudio, reforzar: reforzarAudio)}'
-        : '-c copy -bsf:a aac_adtstoasc';
+    // las cabeceras van en un único argumento separadas por saltos, tal como
+    // las espera ffmpeg: por eso los argumentos van en lista y no en una
+    // cadena, que se partiría por los espacios y quedaría rota
+    final lineas = <String>[
+      if (referente.isNotEmpty) 'Referer: $referente',
+      if (cookies.isNotEmpty) 'Cookie: $cookies',
+      'User-Agent: Mozilla/5.0 (Linux; Android 13) AppleWebKit/537.36 '
+          '(KHTML, like Gecko) Chrome/124.0.0.0 Mobile Safari/537.36',
+    ];
 
-    final ok = await _ffmpegContando(
-      '-y $cabeceras-i "$urlMedia" $salida "$destino"',
+    List<String> ordenCon({required bool conCabeceras}) => <String>[
+          '-y',
+          if (conCabeceras) ...['-headers', '${lineas.join('\r\n')}\r\n'],
+          '-i', urlMedia,
+          if (soloAudio) ...[
+            '-vn',
+            if (reforzarAudio) ...['-af', 'loudnorm=I=-9:TP=-1.0:LRA=9'],
+            ..._codecDe(formatoAudio, reforzar: reforzarAudio),
+          ] else ...[
+            '-c', 'copy', '-bsf:a', 'aac_adtstoasc',
+          ],
+          destino,
+        ];
+
+    var ok = await _ffmpegContando(
+      ordenCon(conCabeceras: true),
       alProgresar: alProgresar,
       cancelado: cancelado,
       desde: 5,
       hasta: 97,
       etiqueta: soloAudio ? 'Sacando el audio' : 'Juntando el video',
     );
+
+    // hay servidores a los que las cabeceras les sientan mal: si falla por
+    // eso, se prueba otra vez sin ellas antes de darse por vencido
+    if (!ok && !cancelado()) {
+      await _borrar(File(destino));
+      ok = await _ffmpegContando(
+        ordenCon(conCabeceras: false),
+        alProgresar: alProgresar,
+        cancelado: cancelado,
+        desde: 5,
+        hasta: 97,
+        etiqueta: soloAudio ? 'Sacando el audio' : 'Juntando el video',
+      );
+    }
     if (cancelado()) {
       await _borrar(File(destino));
       throw _Cancelado();
     }
     if (!ok) {
       await _borrar(File(destino));
-      throw Exception('No se pudo armar el video de esa página.');
+      throw Exception('No se pudo armar el video de esa pagina.  $_porQueFalloFfmpeg');
     }
     alProgresar(100, 'Listo');
     return destino;
@@ -484,32 +563,42 @@ class MotorLocal {
     return 'mp4';
   }
 
-  static String _codecDe(String formato, {bool reforzar = false}) {
+  static List<String> _codecDe(String formato, {bool reforzar = false}) {
     switch (formato) {
       case 'm4a':
         // copiar la pista es instantáneo, pero nivelar el volumen exige rehacerla
-        return reforzar ? '-c:a aac -b:a 192k' : '-c:a copy';
+        return reforzar ? ['-c:a', 'aac', '-b:a', '192k'] : ['-c:a', 'copy'];
       case 'flac':
-        return '-c:a flac';
+        return ['-c:a', 'flac'];
       case 'wav':
-        return '-c:a pcm_s16le';
+        return ['-c:a', 'pcm_s16le'];
       default:
-        return '-c:a libmp3lame -b:a 192k';
+        return ['-c:a', 'libmp3lame', '-b:a', '192k'];
     }
   }
 
-  Future<bool> _ffmpeg(String orden) async {
-    final sesion = await FFmpegKit.execute(orden);
+  /// Lanza ffmpeg con los argumentos ya separados.
+  ///
+  /// Se pasan como lista a propósito: montar la orden en una sola cadena
+  /// obliga a ffmpeg a partirla por espacios, y entonces un título con
+  /// espacios o una cabecera con saltos de línea la rompen entera.
+  Future<bool> _ffmpeg(List<String> argumentos) async {
+    final sesion = await FFmpegKit.executeWithArguments(argumentos);
     final codigo = await sesion.getReturnCode();
-    return ReturnCode.isSuccess(codigo);
+    if (ReturnCode.isSuccess(codigo)) return true;
+    _ultimoFalloFfmpeg = await sesion.getFailStackTrace() ?? '';
+    return false;
   }
+
+  /// Lo último que dijo ffmpeg al fallar, para poder contarlo.
+  String _ultimoFalloFfmpeg = '';
 
   /// Igual que [_ffmpeg], pero contando lo que lleva hecho.
   ///
   /// Juntar los trozos de un video largo tarda minutos. Sin esto la barra se
   /// queda clavada todo ese rato y no hay forma de saber si sigue viva.
   Future<bool> _ffmpegContando(
-    String orden, {
+    List<String> argumentos, {
     required void Function(double, String) alProgresar,
     required bool Function() cancelado,
     required double desde,
@@ -520,11 +609,13 @@ class MotorLocal {
     final fin = Completer<bool>();
     var ultimo = DateTime.fromMillisecondsSinceEpoch(0);
 
-    final sesion = await FFmpegKit.executeAsync(
-      orden,
+    final sesion = await FFmpegKit.executeWithArgumentsAsync(
+      argumentos,
       (s) async {
         final codigo = await s.getReturnCode();
-        if (!fin.isCompleted) fin.complete(ReturnCode.isSuccess(codigo));
+        final bien = ReturnCode.isSuccess(codigo);
+        if (!bien) _ultimoFalloFfmpeg = await s.getOutput() ?? '';
+        if (!fin.isCompleted) fin.complete(bien);
       },
       null,
       (estadistica) {
@@ -552,6 +643,21 @@ class MotorLocal {
       }
     }
     return fin.future;
+  }
+
+  /// Lo que ffmpeg dijo al fallar, recortado a una línea contable.
+  String get _porQueFalloFfmpeg {
+    final texto = _ultimoFalloFfmpeg.trim();
+    if (texto.isEmpty) return '';
+    // de todo el volcado, la última línea suele ser el motivo
+    final lineas = texto
+        .split('\n')
+        .map((l) => l.trim())
+        .where((l) => l.isNotEmpty)
+        .toList();
+    if (lineas.isEmpty) return '';
+    final ultima = lineas.last;
+    return ultima.length > 110 ? '${ultima.substring(0, 107)}...' : ultima;
   }
 
   Future<void> _borrar(File f) async {

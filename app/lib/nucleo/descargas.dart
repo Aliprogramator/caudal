@@ -149,6 +149,37 @@ class GestorDescargas extends ChangeNotifier {
     };
   }
 
+  /// Convierte un fallo en algo que se pueda leer y sirva para saber qué pasó.
+  static String _mensajeDe(Object e) {
+    if (e is ErrorCaudal) return e.mensaje;
+
+    var texto = e.toString();
+    // las excepciones de Dart vienen con este prefijo delante
+    texto = texto.replaceFirst(RegExp(r'^(Exception|_Exception):\s*'), '');
+
+    if (e is FileSystemException) {
+      final motivo = e.osError?.message ?? '';
+      if (motivo.toLowerCase().contains('permission') ||
+          motivo.toLowerCase().contains('denied')) {
+        return 'Android no deja guardar ahí. En Ajustes, cambia dónde se '
+            'guardan las descargas o dale permiso de almacenamiento.';
+      }
+      return 'No se pudo guardar el archivo: $motivo';
+    }
+    if (e is SocketException) {
+      return 'No hay conexión con ese sitio. Comprueba tu internet.';
+    }
+    if (e is HandshakeException) {
+      return 'Falló la conexión segura con ese sitio.';
+    }
+    if (e is TimeoutException) {
+      return 'El sitio no respondió a tiempo. Vuelve a intentarlo.';
+    }
+
+    if (texto.length > 160) texto = '${texto.substring(0, 157)}...';
+    return texto.isEmpty ? 'No se pudo completar la descarga.' : texto;
+  }
+
   void _bombear() {
     if (_enMarcha >= _maxSimultaneas) return;
     for (final d in _cola.reversed) {
@@ -189,7 +220,9 @@ class GestorDescargas extends ChangeNotifier {
     } catch (e) {
       if (!d.pausada && d.estado != EstadoDescarga.cancelada) {
         d.estado = EstadoDescarga.error;
-        d.error = 'No se pudo completar la descarga.';
+        // decir siempre "no se pudo" no ayuda a nadie: tapaba el motivo real y
+        // dejaba a ciegas tanto al usuario como a quien tiene que arreglarlo
+        d.error = _mensajeDe(e);
         d.detalle = 'Error';
       }
     } finally {
@@ -450,7 +483,9 @@ class GestorDescargas extends ChangeNotifier {
           await prueba.writeAsString('ok');
           await prueba.delete();
           return carpeta;
-        } on FileSystemException {
+        } catch (_) {
+          // Android puede negarlo de varias formas segun la version; da igual
+          // cual sea, si no se puede escribir ahi se prueba el siguiente sitio
           continue;
         }
       }
