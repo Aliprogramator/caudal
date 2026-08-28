@@ -19,21 +19,42 @@ const String guionCaptura = r'''
 
   var vistos = {};
 
-  function esMedia(u) {
+  // Adivinar por la direccion no basta: TikTok sirve sus videos desde
+  // /video/tos/... sin extension ninguna, y los trozos de Instagram vienen
+  // con bytestart. Por eso lo primero que se mira es el tipo que declara la
+  // respuesta, que no miente, y la direccion queda de respaldo.
+  function pintaDeMedia(u) {
     if (!u || typeof u !== 'string') return false;
     if (u.indexOf('blob:') === 0 || u.indexOf('data:') === 0) return false;
     if (u.indexOf('http') !== 0) return false;
-    var l = u.split('?')[0].toLowerCase();
-    if (/\.(mp4|m4v|mov|webm|m4a|mp3|aac|ogg|opus|m3u8|mpd)$/.test(l)) return true;
-    // trozos de video: los reproductores los piden con estas pistas
-    if (/\/(videoplayback|video|media|segment)/.test(l) && /mime=video|mime=audio/.test(u)) return true;
-    if (/\.m4s(\?|$)/.test(u)) return true;
+
+    var sinParametros = u.split('?')[0].toLowerCase();
+    if (/\.(mp4|m4v|mov|webm|m4a|mp3|aac|ogg|opus|m3u8|mpd|m4s|ts)$/.test(sinParametros)) return true;
+
+    // rutas tipicas de cada red
+    if (/\/video\/tos\//.test(sinParametros)) return true;          // TikTok
+    if (/\/videoplayback/.test(sinParametros)) return true;         // YouTube
+    if (/bytestart=|byteend=/.test(u)) return true;                 // Facebook, Instagram
+    if (/mime=video|mime=audio/.test(u)) return true;
+    if (/\/(dash|hls)\//.test(sinParametros)) return true;
     return false;
   }
 
-  function avisar(u, origen) {
+  function avisar(u, origen, tipoDeclarado) {
     try {
-      if (!esMedia(u)) return;
+      if (!u || typeof u !== 'string' || u.indexOf('http') !== 0) return;
+
+      var esMedia = false;
+      if (tipoDeclarado) {
+        var t = tipoDeclarado.toLowerCase();
+        esMedia = t.indexOf('video/') === 0 || t.indexOf('audio/') === 0 ||
+                  t.indexOf('application/vnd.apple.mpegurl') === 0 ||
+                  t.indexOf('application/x-mpegurl') === 0 ||
+                  t.indexOf('application/dash+xml') === 0;
+      }
+      if (!esMedia) esMedia = pintaDeMedia(u);
+      if (!esMedia) return;
+
       // los trozos numerados de un mismo video se cuentan una vez
       var clave = u.split('?')[0];
       if (vistos[clave]) return;
@@ -46,17 +67,40 @@ const String guionCaptura = r'''
   var fetchOriginal = window.fetch;
   if (fetchOriginal) {
     window.fetch = function (entrada, opciones) {
+      var u = '';
       try {
-        var u = (typeof entrada === 'string') ? entrada : (entrada && entrada.url);
+        u = (typeof entrada === 'string') ? entrada : (entrada && entrada.url);
         avisar(u, 'fetch');
       } catch (e) {}
-      return fetchOriginal.apply(this, arguments);
+      var r = fetchOriginal.apply(this, arguments);
+      // y cuando conteste, miramos que dice que es
+      try {
+        return r.then(function (respuesta) {
+          try {
+            avisar(respuesta.url || u, 'fetch',
+                   respuesta.headers && respuesta.headers.get('content-type'));
+          } catch (e) {}
+          return respuesta;
+        });
+      } catch (e) {
+        return r;
+      }
     };
   }
 
   var abrirOriginal = XMLHttpRequest.prototype.open;
   XMLHttpRequest.prototype.open = function (metodo, u) {
-    try { avisar(u, 'xhr'); } catch (e) {}
+    try {
+      avisar(u, 'xhr');
+      this.addEventListener('readystatechange', function () {
+        try {
+          if (this.readyState === 2) {
+            avisar(this.responseURL || u, 'xhr',
+                   this.getResponseHeader('content-type'));
+          }
+        } catch (e) {}
+      });
+    } catch (e) {}
     return abrirOriginal.apply(this, arguments);
   };
 
@@ -138,10 +182,16 @@ class MedioCapturado {
       url.contains('mime=audio');
 
   /// Un archivo entero que se puede bajar tal cual, no un trozo ni una lista.
-  bool get esArchivoEntero =>
-      !esLista &&
-      !_limpia.endsWith('.m4s') &&
-      RegExp(r'\.(mp4|m4v|mov|webm|m4a|mp3|aac|ogg|opus)$').hasMatch(_limpia);
+  ///
+  /// TikTok sirve el suyo desde /video/tos/ sin extension ninguna, asi que la
+  /// extension no puede ser la unica senal.
+  bool get esArchivoEntero {
+    if (esLista || _limpia.endsWith('.m4s') || _limpia.endsWith('.ts')) return false;
+    if (RegExp(r'\.(mp4|m4v|mov|webm|m4a|mp3|aac|ogg|opus)$').hasMatch(_limpia)) {
+      return true;
+    }
+    return RegExp(r'/video/tos/').hasMatch(_limpia);
+  }
 
   /// Cuanto nos interesa: preferimos un mp4 entero antes que una lista de
   /// trozos, porque se baja de una y no hay que pegar nada.

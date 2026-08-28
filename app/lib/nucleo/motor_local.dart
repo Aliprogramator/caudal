@@ -277,6 +277,7 @@ class MotorLocal {
     required bool Function() cancelado,
     bool reforzarAudio = false,
     String referente = '',
+    String cookies = '',
   }) async {
     final nombre = nombreSeguro(titulo.isEmpty ? 'Caudal' : titulo);
     final soloAudio = tipo == TipoMedio.audio;
@@ -294,6 +295,7 @@ class MotorLocal {
         cancelado: cancelado,
         reforzarAudio: reforzarAudio,
         referente: referente,
+        cookies: cookies,
       );
     }
 
@@ -305,7 +307,8 @@ class MotorLocal {
 
     alProgresar(0, 'Descargando');
     await _bajarUrl(urlMedia, temporal, alProgresar, cancelado,
-        desde: 0, hasta: soloAudio ? 70 : 96, referente: referente);
+        desde: 0, hasta: soloAudio ? 70 : 96,
+        referente: referente, cookies: cookies);
 
     // video tal cual: ya está
     if (!soloAudio) {
@@ -342,6 +345,7 @@ class MotorLocal {
     required bool Function() cancelado,
     required bool reforzarAudio,
     required String referente,
+    String cookies = '',
   }) async {
     alProgresar(5, 'Juntando el video');
     final destino = _libre(carpeta, nombre, soloAudio ? formatoAudio : 'mp4');
@@ -386,6 +390,7 @@ class MotorLocal {
     required double desde,
     required double hasta,
     String referente = '',
+    String cookies = '',
   }) async {
     final cliente = HttpClient()
       ..connectionTimeout = const Duration(seconds: 25)
@@ -400,6 +405,8 @@ class MotorLocal {
           'Mozilla/5.0 (Linux; Android 13) AppleWebKit/537.36 (KHTML, like Gecko) '
           'Chrome/124.0.0.0 Mobile Safari/537.36');
       if (referente.isNotEmpty) peticion.headers.set('Referer', referente);
+      // sin las cookies de la sesion, muchos sitios devuelven 403
+      if (cookies.isNotEmpty) peticion.headers.set('Cookie', cookies);
       respuesta = await peticion.close().timeout(const Duration(seconds: 40));
     } on TimeoutException {
       cliente.close(force: true);

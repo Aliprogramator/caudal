@@ -30,6 +30,7 @@ class Descarga {
     this.autor = '',
     this.miniatura = '',
     this.urlMedia = '',
+    this.cookies = '',
   });
 
   final String id;
@@ -38,6 +39,10 @@ class Descarga {
   /// Direccion del archivo en si, cuando el navegador la vio pasar mientras la
   /// pagina reproducia el video. Vacia para YouTube, que se resuelve solo.
   final String urlMedia;
+
+  /// Cookies de la pagina de donde salio. Muchos sitios rechazan la peticion
+  /// si no llegan: es la forma que tienen de comprobar que eres tu.
+  final String cookies;
 
   /// Texto a buscar cuando no hay enlace exacto (canciones de Spotify o Apple).
   final String busqueda;
@@ -103,11 +108,13 @@ class GestorDescargas extends ChangeNotifier {
     String autor = '',
     String miniatura = '',
     String urlMedia = '',
+    String cookies = '',
   }) {
     final d = Descarga(
       id: 'd${++_contador}_${DateTime.now().millisecondsSinceEpoch}',
       url: url,
       urlMedia: urlMedia,
+      cookies: cookies,
       busqueda: busqueda,
       tipo: tipo,
       calidad: calidad,
@@ -296,6 +303,7 @@ class GestorDescargas extends ChangeNotifier {
         formatoAudio: d.formatoAudio,
         carpeta: carpeta,
         referente: d.url,
+        cookies: d.cookies,
         reforzarAudio: d.esAudio && ajustes.modoMusica,
         cancelado: () => d.estado == EstadoDescarga.cancelada || d.pausada,
         alProgresar: _avisarDelAvance(d),

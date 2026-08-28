@@ -274,6 +274,24 @@ class _VistaNavegadorState extends State<VistaNavegador> with AutomaticKeepAlive
   ///
   /// Si todavía no hemos visto pasar nada, se empuja al video a arrancar y se
   /// espera un momento: casi siempre con eso aparece.
+  /// Las cookies de la pagina que se esta viendo.
+  ///
+  /// Sin ellas muchos sitios responden 403 a la descarga: es como se aseguran
+  /// de que quien pide el video es el mismo que estaba viendo la pagina.
+  Future<String> _cookiesDeLaPagina() async {
+    try {
+      final r = await _web.runJavaScriptReturningResult('document.cookie');
+      final texto = r.toString();
+      // el resultado viene entrecomillado y con las comillas escapadas
+      return texto
+          .replaceAll(RegExp(r'^"|"$'), '')
+          .replaceAll(r'\"', '"')
+          .trim();
+    } catch (_) {
+      return '';
+    }
+  }
+
   Future<String> _mediaParaDescargar(TipoMedio tipo) async {
     if (MotorLocal.puedeSolo(_urlActual)) return '';
 
@@ -310,17 +328,26 @@ class _VistaNavegadorState extends State<VistaNavegador> with AutomaticKeepAlive
     setState(() => _buscandoMedia = false);
 
     if (!esYoutube && media.isEmpty) {
+      // el numero dice si el problema es que no vemos nada pasar o que lo que
+      // pasa no nos sirve; sin eso no hay forma de saber por donde falla
       avisar(
         context,
-        'No se encontro el video. Dale al play un segundo y vuelve a intentarlo.',
+        _mediosDetectados.isEmpty
+            ? 'No se vio pasar ningun video. Dale al play y vuelve a intentarlo.'
+            : 'Se vieron ${_mediosDetectados.length} archivos pero ninguno servia. '
+                'Prueba a darle al play.',
         esError: true,
       );
       return;
     }
 
+    final galletas = await _cookiesDeLaPagina();
+    if (!mounted) return;
+
     servicios.descargas.encolar(
       url: _urlActual,
       urlMedia: media,
+      cookies: galletas,
       tipo: tipo,
       calidad: 'mejor',
       formatoAudio: servicios.ajustes.formatoAudio,
