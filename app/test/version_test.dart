@@ -47,7 +47,7 @@ void main() {
   });
 
   test('la version de la app es la esperada', () {
-    expect(versionApp, '1.5.0');
+    expect(versionApp, '1.5.1');
     expect(origen, 'Aliprogramator/caudal');
   });
 }

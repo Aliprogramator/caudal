@@ -306,6 +306,8 @@ class GestorDescargas extends ChangeNotifier {
   Future<void> _bajarDeLaPagina(Descarga d) async {
     d.estado = EstadoDescarga.descargando;
     d.detalle = 'Buscando el video';
+    // un poco de avance desde el principio: un cero quieto parece averiado
+    d.progreso = 1;
     notifyListeners();
 
     var media = d.urlMedia;
@@ -332,12 +334,16 @@ class GestorDescargas extends ChangeNotifier {
       // Instagram y TikTok no ponen el video en la pagina: hay que abrirla de
       // verdad y ver que pide. Se hace en un navegador que no se ve.
       d.detalle = 'Abriendo la pagina';
+      d.progreso = 3;
       notifyListeners();
       final oculta = await capturador
           .capturar(d.url, paraAudio: d.esAudio)
           .timeout(const Duration(seconds: 40),
               onTimeout: () => const CapturaOculta());
       if (oculta.vale) {
+        d.detalle = 'Video encontrado';
+        d.progreso = 5;
+        notifyListeners();
         media = oculta.url;
         if (galletas.isEmpty) galletas = oculta.cookies;
         if ((titulo.isEmpty || titulo == sitioDe(d.url)) &&

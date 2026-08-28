@@ -37,12 +37,36 @@ class CapturadorOculto extends ChangeNotifier {
   final List<MedioCapturado> _vistos = [];
   Timer? _insistir;
   bool _paraAudio = false;
+  bool _montado = false;
 
   /// El navegador oculto tiene que estar en pantalla para funcionar, aunque
   /// sea de un pixel: si no, Android no ejecuta su JavaScript.
   WebViewController? get controlador => _web;
 
   bool get trabajando => _enCurso != null && !_enCurso!.isCompleted;
+
+  /// Deja el navegador listo nada más arrancar la app.
+  ///
+  /// Crearlo en el momento de usarlo no sirve: el widget tarda un instante en
+  /// aparecer en pantalla y, hasta que aparece, Android no ejecuta nada de lo
+  /// que le mandemos. Se queda esperando en cero y nunca ve pasar el video.
+  void preparar() {
+    if (_web != null) return;
+    _web = WebViewController()
+      ..setJavaScriptMode(JavaScriptMode.unrestricted)
+      ..setUserAgent(
+        'Mozilla/5.0 (Linux; Android 13) AppleWebKit/537.36 (KHTML, like Gecko) '
+        'Chrome/124.0.0.0 Mobile Safari/537.36',
+      )
+      ..addJavaScriptChannel('CaudalMedios', onMessageReceived: _llego);
+    notifyListeners();
+  }
+
+  /// Lo llama el widget cuando ya está de verdad en pantalla.
+  void marcarMontado() {
+    if (_montado) return;
+    _montado = true;
+  }
 
   /// Abre [url] a escondidas y espera a ver pasar un video.
   ///
@@ -62,13 +86,13 @@ class CapturadorOculto extends ChangeNotifier {
     final fin = Completer<CapturaOculta>();
     _enCurso = fin;
 
-    _web ??= WebViewController()
-      ..setJavaScriptMode(JavaScriptMode.unrestricted)
-      ..setUserAgent(
-        'Mozilla/5.0 (Linux; Android 13) AppleWebKit/537.36 (KHTML, like Gecko) '
-        'Chrome/124.0.0.0 Mobile Safari/537.36',
-      )
-      ..addJavaScriptChannel('CaudalMedios', onMessageReceived: _llego);
+    preparar();
+
+    // esperar a que el widget esté de verdad en pantalla: si cargamos antes,
+    // el JavaScript no llega a ejecutarse y no vemos pasar nada
+    for (var i = 0; i < 40 && !_montado; i++) {
+      await Future<void>.delayed(const Duration(milliseconds: 100));
+    }
 
     _web!.setNavigationDelegate(NavigationDelegate(
       onPageStarted: (_) => _web!.runJavaScript(guionCaptura),
@@ -80,7 +104,6 @@ class CapturadorOculto extends ChangeNotifier {
       },
     ));
 
-    notifyListeners();          // por si el widget aun no estaba montado
     await _web!.loadRequest(Uri.parse(url));
 
     // se corta pase lo que pase: nadie espera indefinidamente
@@ -187,17 +210,33 @@ class CapturadorOculto extends ChangeNotifier {
 ///
 /// Tiene que estar montado de verdad: un WebView fuera del arbol no ejecuta
 /// JavaScript en Android, y entonces no veriamos pasar nada.
-class NavegadorOculto extends StatelessWidget {
+class NavegadorOculto extends StatefulWidget {
   const NavegadorOculto({super.key, required this.capturador});
 
   final CapturadorOculto capturador;
 
   @override
+  State<NavegadorOculto> createState() => _NavegadorOcultoState();
+}
+
+class _NavegadorOcultoState extends State<NavegadorOculto> {
+  @override
+  void initState() {
+    super.initState();
+    // se deja listo desde el arranque, para que cuando haga falta ya lleve
+    // rato en pantalla y responda a la primera
+    widget.capturador.preparar();
+    WidgetsBinding.instance.addPostFrameCallback((_) {
+      widget.capturador.marcarMontado();
+    });
+  }
+
+  @override
   Widget build(BuildContext context) {
     return ListenableBuilder(
-      listenable: capturador,
+      listenable: widget.capturador,
       builder: (context, _) {
-        final c = capturador.controlador;
+        final c = widget.capturador.controlador;
         if (c == null) return const SizedBox.shrink();
         return SizedBox(
           width: 1,

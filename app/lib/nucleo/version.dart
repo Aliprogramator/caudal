@@ -11,7 +11,7 @@ import 'package:open_filex/open_filex.dart';
 import 'package:path_provider/path_provider.dart';
 
 /// Version que lleva esta copia. Sube tambien la de pubspec.yaml al publicar.
-const String versionApp = '1.5.0';
+const String versionApp = '1.5.1';
 
 /// usuario/repositorio de GitHub donde se publican las versiones
 const String origen = 'Aliprogramator/caudal';
