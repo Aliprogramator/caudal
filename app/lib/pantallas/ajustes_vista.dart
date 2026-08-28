@@ -7,7 +7,9 @@ import '../nucleo/formato.dart';
 import '../nucleo/modelos.dart';
 import '../nucleo/servidor.dart';
 import '../nucleo/tema.dart';
+import '../nucleo/version.dart';
 import '../widgets/comunes.dart';
+import '../widgets/hoja_version.dart';
 import 'acceso.dart';
 
 /// Ajustes de la app, cuenta y estado de la conexión.
@@ -239,13 +241,33 @@ class _VistaAjustesState extends State<VistaAjustes> {
                 ),
               ]),
 
+              _seccion('Version'),
+              _tarjeta([
+                ListTile(
+                  leading: const Icon(Icons.system_update_rounded),
+                  title: const Text('Buscar actualizaciones'),
+                  subtitle: Text(
+                    _buscandoVersion ? 'Comprobando...' : _estadoVersion,
+                    style: Theme.of(context).textTheme.bodySmall,
+                  ),
+                  trailing: _buscandoVersion
+                      ? const SizedBox(
+                          width: 18,
+                          height: 18,
+                          child: CircularProgressIndicator(strokeWidth: 2))
+                      : const Icon(Icons.chevron_right_rounded),
+                  onTap: _buscandoVersion ? null : _buscarVersion,
+                ),
+              ]),
+
               const SizedBox(height: 26),
               Center(
                 child: Column(
                   children: [
                     const Icon(Icons.water_drop_rounded, color: Tono.texto3, size: 20),
                     const SizedBox(height: 6),
-                    Text('Caudal 1.1', style: Theme.of(context).textTheme.bodySmall),
+                    Text('Caudal $versionApp',
+                        style: Theme.of(context).textTheme.bodySmall),
                     const SizedBox(height: 3),
                     Text(
                       'Descarga solo contenido cuyo uso te permitan\nla licencia y los '
@@ -264,6 +286,22 @@ class _VistaAjustesState extends State<VistaAjustes> {
   }
 
   // ---------------------------------------------------------------- cuenta
+
+  bool _buscandoVersion = false;
+  String _estadoVersion = 'Tienes la version $versionApp';
+
+  Future<void> _buscarVersion() async {
+    setState(() => _buscandoVersion = true);
+    final novedad = await buscarActualizacion();
+    if (!mounted) return;
+    setState(() {
+      _buscandoVersion = false;
+      _estadoVersion = novedad == null
+          ? 'Tienes la $versionApp. Es la mas reciente.'
+          : 'Hay una nueva: ${novedad.version}';
+    });
+    if (novedad != null) await mostrarHojaVersion(context, novedad);
+  }
 
   Widget _tarjetaCuenta(Ajustes a) {
     if (!a.conSesion) {

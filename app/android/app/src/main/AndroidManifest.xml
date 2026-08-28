@@ -25,6 +25,9 @@
     <uses-permission android:name="android.permission.WAKE_LOCK"/>
     <uses-permission android:name="android.permission.POST_NOTIFICATIONS"/>
 
+    <!-- para instalar las actualizaciones desde la propia app -->
+    <uses-permission android:name="android.permission.REQUEST_INSTALL_PACKAGES"/>
+
     <uses-feature android:name="android.hardware.camera" android:required="false"/>
 
     <application

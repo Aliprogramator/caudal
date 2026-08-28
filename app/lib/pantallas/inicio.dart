@@ -4,7 +4,9 @@ import '../main.dart';
 import '../nucleo/descargas.dart';
 import '../nucleo/modelos.dart';
 import '../nucleo/tema.dart';
+import '../nucleo/version.dart';
 import '../widgets/comunes.dart';
+import '../widgets/hoja_version.dart';
 import '../widgets/mini_reproductor.dart';
 import 'biblioteca.dart';
 import 'descargas_vista.dart';
@@ -32,6 +34,17 @@ class _PantallaInicioState extends State<PantallaInicio> {
   void initState() {
     super.initState();
     WidgetsBinding.instance.addPostFrameCallback((_) => _escucharDescargas());
+    _mirarSiHayVersionNueva();
+  }
+
+  /// Al arrancar miramos si hay version nueva. Si no la hay, el usuario ni se
+  /// entera: esperamos unos segundos para no competir con la carga inicial.
+  Future<void> _mirarSiHayVersionNueva() async {
+    await Future<void>.delayed(const Duration(seconds: 5));
+    if (!mounted) return;
+    final novedad = await buscarActualizacion();
+    if (!mounted || novedad == null) return;
+    await mostrarHojaVersion(context, novedad);
   }
 
   void _escucharDescargas() {
