@@ -121,17 +121,14 @@ class MotorLocal {
     }
 
     alProgresar(85, 'Convirtiendo a ${formatoAudio.toUpperCase()}');
-    final destino = _libre(carpeta, nombre, formatoAudio);
-    final ok = await _ffmpeg([
-      '-y', '-i', crudo.path,
-      if (reforzar) ...['-af', 'loudnorm=I=-9:TP=-1.0:LRA=9'],
-      if (formatoAudio == 'mp3') ...['-b:a', '192k'],
-      '-vn', destino,
-    ]);
+    final destino = await _sacarAudio(
+      origen: crudo,
+      carpeta: carpeta,
+      nombre: nombre,
+      formatoAudio: formatoAudio,
+      reforzarAudio: reforzar,
+    );
     await _borrar(crudo);
-    if (!ok) {
-      throw Exception('No se pudo convertir el audio.  $_porQueFalloFfmpeg');
-    }
     alProgresar(100, 'Listo');
     return destino;
   }
@@ -360,27 +357,65 @@ class MotorLocal {
 
     // solo sonido: se saca del archivo que acabamos de bajar
     alProgresar(72, 'Sacando el audio');
-    final destino = _libre(carpeta, nombre, formatoAudio);
-    var ok = await _ffmpeg([
-      '-y', '-i', temporal.path, '-vn',
-      if (reforzarAudio) ...['-af', 'loudnorm=I=-9:TP=-1.0:LRA=9'],
-      ..._codecDe(formatoAudio, reforzar: reforzarAudio),
-      destino,
-    ]);
-
-    // copiar la pista tal cual falla si el contenedor no la admite: en ese
-    // caso se rehace, que tarda algo mas pero siempre sale
-    if (!ok && formatoAudio == 'm4a' && !reforzarAudio) {
-      ok = await _ffmpeg([
-        '-y', '-i', temporal.path, '-vn', '-c:a', 'aac', '-b:a', '192k', destino,
-      ]);
-    }
+    final destino = await _sacarAudio(
+      origen: temporal,
+      carpeta: carpeta,
+      nombre: nombre,
+      formatoAudio: formatoAudio,
+      reforzarAudio: reforzarAudio,
+    );
     await _borrar(temporal);
-    if (!ok) {
-      throw Exception('No se pudo sacar el audio de ese video.  $_porQueFalloFfmpeg');
-    }
     alProgresar(100, 'Listo');
     return destino;
+  }
+
+  /// Saca la pista de sonido de un archivo, probando varias formas.
+  ///
+  /// Que falle la primera no quiere decir que no se pueda: cada video trae su
+  /// sonido en un formato y no todos admiten lo mismo. Se prueba lo que pidió
+  /// el usuario, luego AAC —que lo traga casi todo— y por último copiar la
+  /// pista tal cual, que no reconvierte nada.
+  Future<String> _sacarAudio({
+    required File origen,
+    required Directory carpeta,
+    required String nombre,
+    required String formatoAudio,
+    required bool reforzarAudio,
+  }) async {
+    // un archivo diminuto no es un video: suele ser la pagina de error que
+    // devolvio el servidor, guardada tal cual
+    final tamano = await origen.length();
+    if (tamano < 10240) {
+      throw Exception(
+        'Lo que se bajo no es un video (solo ${tamano ~/ 1024} KB). '
+        'Puede que el enlace haya caducado: recarga la pagina y reintenta.',
+      );
+    }
+
+    final filtro = reforzarAudio
+        ? const ['-af', 'loudnorm=I=-9:TP=-1.0:LRA=9']
+        : const <String>[];
+
+    final vias = <(String, List<String>)>[
+      (formatoAudio, [...filtro, ..._codecDe(formatoAudio, reforzar: reforzarAudio)]),
+      // AAC lo admite casi cualquier contenedor y va en el propio ffmpeg
+      if (formatoAudio != 'm4a') ('m4a', [...filtro, '-c:a', 'aac', '-b:a', '192k']),
+      if (formatoAudio == 'm4a') ('m4a', [...filtro, '-c:a', 'aac', '-b:a', '192k']),
+      // último recurso: la pista tal como viene, sin tocar nada
+      if (!reforzarAudio) ('m4a', const ['-c:a', 'copy']),
+    ];
+
+    for (final (extension, codec) in vias) {
+      final destino = _libre(carpeta, nombre, extension);
+      final ok = await _ffmpeg(
+          ['-y', '-i', origen.path, '-vn', ...codec, destino]);
+      if (ok && await File(destino).exists() && await File(destino).length() > 0) {
+        return destino;
+      }
+      await _borrar(File(destino));
+    }
+
+    throw Exception('No se pudo sacar el audio de ese video.  $_porQueFalloFfmpeg');
   }
 
   /// Arma el video juntando los trozos de una lista m3u8 o mpd.
@@ -586,7 +621,8 @@ class MotorLocal {
     final sesion = await FFmpegKit.executeWithArguments(argumentos);
     final codigo = await sesion.getReturnCode();
     if (ReturnCode.isSuccess(codigo)) return true;
-    _ultimoFalloFfmpeg = await sesion.getFailStackTrace() ?? '';
+    // cuando ffmpeg falla no lanza nada: lo unico que cuenta es su salida
+    _ultimoFalloFfmpeg = await sesion.getOutput() ?? '';
     return false;
   }
 
