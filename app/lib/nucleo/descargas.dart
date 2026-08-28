@@ -200,12 +200,25 @@ class GestorDescargas extends ChangeNotifier {
     try {
       // YouTube se resuelve solo y da la mejor calidad, con el sonido aparte.
       if (MotorLocal.puedeSolo(d.url)) {
-        // Y solo por ahi: el camino general captura lo que el reproductor va
-        // pidiendo, y en YouTube eso son trozos sueltos que no valen como
-        // archivo. Antes se caia ahi al fallar y se bajaba basura, tapando
-        // ademas el motivo de verdad.
-        await _bajarAqui(d).timeout(const Duration(hours: 3));
-        return;
+        try {
+          await _bajarAqui(d).timeout(const Duration(hours: 3));
+          return;
+        } on ErrorCaudal catch (e) {
+          // YouTube niega por API los videos con restriccion de edad, y a
+          // veces ni eso: falla y ya. Si el usuario tenia el video abierto en
+          // el navegador, alli SI se reproduce (esta con su sesion), y esa
+          // direccion sirve. Solo se intenta si la tenemos: sin ella el camino
+          // general no sabria por donde empezar en YouTube.
+          if (d.urlMedia.isEmpty) rethrow;
+          d.detalle = 'Probando por el navegador';
+          notifyListeners();
+          try {
+            await _bajarDeLaPagina(d).timeout(const Duration(hours: 3));
+            return;
+          } catch (_) {
+            throw e;      // se cuenta el motivo de YouTube, que explica mejor
+          }
+        }
       }
       await _bajarDeLaPagina(d).timeout(const Duration(hours: 3));
     } on ErrorCaudal catch (e) {

@@ -20,40 +20,55 @@ class MotorLocal {
 
   final YoutubeExplode _yt = YoutubeExplode();
 
-  /// Con que aplicaciones nos hacemos pasar ante YouTube, y en que orden.
+  /// Con que aplicaciones nos hacemos pasar ante YouTube.
   ///
-  /// YouTube responde distinto segun quien pregunte, y no siempre contesta al
-  /// mismo. Probado contra videos reales: el de Android sin SDK es el unico
-  /// que sirve los que tienen restriccion de edad, asi que va primero; los
-  /// otros cubren los casos en que ese falla. La television y el navegador
-  /// movil fallan casi siempre, pero de vez en cuando son los unicos que
-  /// contestan, asi que se quedan al final.
+  /// YouTube contesta distinto segun quien pregunte, y ademas falla de vez en
+  /// cuando sin motivo: el mismo cliente que dice que no, un minuto despues
+  /// dice que si. Medido contra videos reales, incluidos los que tienen
+  /// restriccion de edad, solo estos cuatro sirven de algo; los otros siete
+  /// que ofrece la libreria no contestaron ni una vez.
   static final List<YoutubeApiClient> _clientes = [
+    YoutubeApiClient.android,
     YoutubeApiClient.androidSdkless,
     YoutubeApiClient.androidVr,
     YoutubeApiClient.ios,
-    YoutubeApiClient.tv,
-    YoutubeApiClient.mweb,
   ];
 
   /// Pide el manifiesto probando con cada cliente hasta que uno conteste.
+  ///
+  /// Se dan dos vueltas: como los fallos son intermitentes, insistir sale
+  /// mucho mas barato que dejar al usuario sin su video.
   Future<StreamManifest> _manifiesto(VideoId id) async {
     Object? ultimoFallo;
-    for (final cliente in _clientes) {
-      try {
-        final m = await _yt.videos.streamsClient
-            .getManifest(id, ytClients: [cliente])
-            .timeout(const Duration(seconds: 35));
-        if (m.audioOnly.isNotEmpty || m.muxed.isNotEmpty || m.videoOnly.isNotEmpty) {
-          return m;
+    for (var vuelta = 0; vuelta < 2; vuelta++) {
+      for (final cliente in _clientes) {
+        try {
+          final m = await _yt.videos.streamsClient
+              .getManifest(id, ytClients: [cliente])
+              .timeout(const Duration(seconds: 30));
+          if (m.audioOnly.isNotEmpty || m.muxed.isNotEmpty) return m;
+          if (m.videoOnly.isNotEmpty) return m;
+        } catch (e) {
+          ultimoFallo = e;
         }
-      } catch (e) {
-        ultimoFallo = e;
+      }
+      if (vuelta == 0) {
+        await Future<void>.delayed(const Duration(milliseconds: 800));
       }
     }
-    // ninguno contesto: se cuenta lo ultimo que dijo YouTube
     throw ultimoFallo ??
         Exception('YouTube no devolvio ninguna pista para ese video.');
+  }
+
+  /// El título del video, o un nombre razonable si YouTube no lo da.
+  Future<String> _tituloDe(VideoId id) async {
+    try {
+      final v = await _yt.videos.get(id).timeout(const Duration(seconds: 20));
+      if (v.title.trim().isNotEmpty) return v.title;
+    } catch (_) {
+      // pasa con los videos restringidos: se sigue con un nombre generico
+    }
+    return 'YouTube ${id.value}';
   }
 
   /// ¿Este enlace lo resuelve YouTube por su cuenta, sin mirar la página?
@@ -65,8 +80,14 @@ class MotorLocal {
 
   /// Datos del video sin descargar nada.
   Future<Ficha> resolver(String url) async {
-    final video = await _yt.videos.get(url);
-    final manifiesto = await _manifiesto(video.id);
+    final id = VideoId(url);
+    final manifiesto = await _manifiesto(id);
+    Video? video;
+    try {
+      video = await _yt.videos.get(id);
+    } catch (_) {
+      // sin ficha tampoco pasa nada: lo importante son las calidades
+    }
 
     final alturas = <int>{};
     for (final s in manifiesto.videoOnly) {
@@ -85,12 +106,12 @@ class MotorLocal {
     };
 
     return Ficha(
-      url: video.url,
-      titulo: video.title,
-      autor: video.author,
-      miniatura: video.thumbnails.highResUrl,
-      duracion: video.duration?.inSeconds ?? 0,
-      duracionTexto: formatoSegundos(video.duration?.inSeconds ?? 0),
+      url: video?.url ?? url,
+      titulo: video?.title ?? 'Video de YouTube',
+      autor: video?.author ?? '',
+      miniatura: video?.thumbnails.highResUrl ?? '',
+      duracion: video?.duration?.inSeconds ?? 0,
+      duracionTexto: formatoSegundos(video?.duration?.inSeconds ?? 0),
       plataforma: 'YouTube',
       tieneVideo: calidades.isNotEmpty,
       tieneAudio: manifiesto.audioOnly.isNotEmpty || manifiesto.muxed.isNotEmpty,
@@ -119,9 +140,12 @@ class MotorLocal {
     bool reforzarAudio = false,
   }) async {
     alProgresar(0, 'Buscando el video');
-    final video = await _yt.videos.get(url);
-    final manifiesto = await _manifiesto(video.id);
-    final nombre = nombreSeguro(video.title);
+
+    // lo esencial es el manifiesto; el titulo es un adorno. Si se pide primero
+    // el titulo y esa llamada falla, nos quedamos sin video por nada.
+    final id = VideoId(url);
+    final manifiesto = await _manifiesto(id);
+    final nombre = nombreSeguro(await _tituloDe(id));
 
     if (tipo == TipoMedio.audio) {
       return _soloAudio(manifiesto, nombre, formatoAudio, carpeta,

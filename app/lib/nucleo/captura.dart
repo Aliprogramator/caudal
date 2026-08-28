@@ -164,9 +164,33 @@ const String guionDespertar = r'''
 })();
 ''';
 
+/// Deja una direccion capturada lista para bajar el archivo entero.
+///
+/// Los reproductores no piden el video de una vez: lo van pidiendo a trozos,
+/// anadiendo a la direccion en que byte empieza y en cual acaba. Si se baja
+/// tal cual, lo que llega es un pedazo suelto que no se puede reproducir ni
+/// convertir: de ahi los "Invalid data" y los archivos de cero bytes.
+///
+/// Quitando esos parametros, el servidor devuelve el archivo completo.
+/// Comprobado: la misma direccion da 1 MB con range y 3,4 MB sin el.
+String limpiarTrozos(String url) {
+  if (!url.contains('?')) return url;
+  const sobran = {'range', 'rn', 'rbuf', 'ump', 'srfvp'};
+
+  final corte = url.indexOf('?');
+  final base = url.substring(0, corte);
+  final partes = url
+      .substring(corte + 1)
+      .split('&')
+      .where((p) => p.isNotEmpty && !sobran.contains(p.split('=').first))
+      .toList();
+
+  return partes.isEmpty ? base : '$base?${partes.join('&')}';
+}
+
 /// Una direccion de media que se vio pasar por la pagina.
 class MedioCapturado {
-  MedioCapturado(this.url, this.origen);
+  MedioCapturado(String url, this.origen) : url = limpiarTrozos(url);
 
   final String url;
 

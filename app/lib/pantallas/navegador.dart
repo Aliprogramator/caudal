@@ -269,8 +269,9 @@ class _VistaNavegadorState extends State<VistaNavegador> with AutomaticKeepAlive
   /// Descarga sin preguntar nada: la mejor calidad que haya.
   /// La mejor dirección de las que vimos pasar mientras la página reproducía.
   ///
-  /// Para YouTube se devuelve vacía a propósito: allí el motor resuelve el
-  /// video entero y saca mejor calidad que lo que sirve el reproductor web.
+  /// En YouTube su motor va primero, porque da mejor calidad. Pero lo que
+  /// hayamos visto pasar se manda igual: sirve de respaldo cuando el motor
+  /// falla, que es lo que ocurre con los videos con restricción de edad.
   ///
   /// Si todavía no hemos visto pasar nada, se empuja al video a arrancar y se
   /// espera un momento: casi siempre con eso aparece.
@@ -293,10 +294,11 @@ class _VistaNavegadorState extends State<VistaNavegador> with AutomaticKeepAlive
   }
 
   Future<String> _mediaParaDescargar(TipoMedio tipo) async {
-    if (MotorLocal.puedeSolo(_urlActual)) return '';
-
     var mejor = mejorCapturado(_mediosDetectados, paraAudio: tipo == TipoMedio.audio);
     if (mejor != null) return mejor.url;
+
+    // en YouTube no se insiste ni se despierta nada: su motor va primero
+    if (MotorLocal.puedeSolo(_urlActual)) return '';
 
     // nada capturado: le damos un empujón al reproductor y esperamos
     await _web.runJavaScript(guionCaptura);

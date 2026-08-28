@@ -53,4 +53,39 @@ void main() {
       expect(guionDespertar, contains('muted'));
     });
   });
+  group('quitar los trozos de la direccion', () {
+    test('fuera el range, que es lo que partia el archivo', () {
+      const conTrozo =
+          'https://r5.googlevideo.com/videoplayback?expire=1&itag=140'
+          '&range=0-1048575&rn=3&rbuf=0&sig=abc';
+      final limpia = limpiarTrozos(conTrozo);
+      expect(limpia, isNot(contains('range=')));
+      expect(limpia, isNot(contains('rn=')));
+      expect(limpia, isNot(contains('rbuf=')));
+      // lo que identifica y firma el video tiene que seguir ahi
+      expect(limpia, contains('itag=140'));
+      expect(limpia, contains('sig=abc'));
+      expect(limpia, contains('expire=1'));
+    });
+
+    test('una direccion sin parametros se queda igual', () {
+      const u = 'https://cdn.ejemplo.com/video.mp4';
+      expect(limpiarTrozos(u), u);
+    });
+
+    test('no se lleva por delante parametros parecidos', () {
+      final limpia = limpiarTrozos('https://c.com/v.mp4?arange=1&rnd=2&range=0-99');
+      expect(limpia, contains('arange=1'));
+      expect(limpia, contains('rnd=2'));
+      expect(limpia, isNot(contains('&range=0-99')));
+    });
+
+    test('lo capturado llega ya limpio', () {
+      final m = MedioCapturado(
+          'https://r5.googlevideo.com/videoplayback?itag=140&range=0-1048575', 'xhr');
+      expect(m.url, isNot(contains('range=')));
+      expect(m.url, contains('itag=140'));
+    });
+  });
+
 }
