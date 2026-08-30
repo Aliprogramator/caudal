@@ -6,6 +6,7 @@ import 'nucleo/ajustes.dart';
 import 'nucleo/almacen.dart';
 import 'nucleo/capturador_oculto.dart';
 import 'nucleo/descargas.dart';
+import 'nucleo/navegador_caudal.dart';
 import 'nucleo/tema.dart';
 import 'pantallas/inicio.dart';
 import 'reproduccion/reproductor_audio.dart';
@@ -34,6 +35,8 @@ Future<void> main() async {
 
   final almacen = await Almacen.abrir();
   final capturador = CapturadorOculto();
+  final navegador = NavegadorCaudal();
+  await navegador.preparar();
   final descargas = GestorDescargas(
       almacen: almacen, ajustes: ajustes, capturador: capturador);
   final audio = ReproductorAudio();
@@ -46,6 +49,7 @@ Future<void> main() async {
     descargas: descargas,
     audio: audio,
     capturador: capturador,
+    navegador: navegador,
   ));
 }
 
@@ -58,6 +62,7 @@ class Servicios extends InheritedWidget {
     required this.descargas,
     required this.audio,
     required this.capturador,
+    required this.navegador,
     required super.child,
   });
 
@@ -65,6 +70,7 @@ class Servicios extends InheritedWidget {
   final Almacen almacen;
   final GestorDescargas descargas;
   final CapturadorOculto capturador;
+  final NavegadorCaudal navegador;
   final ReproductorAudio audio;
 
   static Servicios de(BuildContext context) {
@@ -97,6 +103,7 @@ class CaudalApp extends StatelessWidget {
     required this.descargas,
     required this.audio,
     required this.capturador,
+    required this.navegador,
   });
 
   final Ajustes ajustes;
@@ -104,6 +111,7 @@ class CaudalApp extends StatelessWidget {
   final GestorDescargas descargas;
   final ReproductorAudio audio;
   final CapturadorOculto capturador;
+  final NavegadorCaudal navegador;
 
   @override
   Widget build(BuildContext context) {
@@ -113,6 +121,7 @@ class CaudalApp extends StatelessWidget {
       descargas: descargas,
       audio: audio,
       capturador: capturador,
+      navegador: navegador,
       child: MaterialApp(
         title: 'Caudal',
         debugShowCheckedModeBanner: false,
@@ -126,20 +135,7 @@ class CaudalApp extends StatelessWidget {
               );
           return MediaQuery(
             data: MediaQuery.of(context).copyWith(textScaler: escala),
-            // el navegador oculto va aqui: tiene que estar montado de verdad
-            // para que Android ejecute su JavaScript, aunque no se vea
-            child: Stack(
-              children: [
-                hijo!,
-                Positioned(
-                  left: 0,
-                  bottom: 0,
-                  child: IgnorePointer(
-                    child: NavegadorOculto(capturador: capturador),
-                  ),
-                ),
-              ],
-            ),
+            child: hijo!,
           );
         },
       ),

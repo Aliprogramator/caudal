@@ -31,7 +31,10 @@ class Descarga {
     this.autor = '',
     this.miniatura = '',
     this.urlMedia = '',
+    this.candidatas = const [],
     this.cookies = '',
+    this.esArchivo = false,
+    this.nombreArchivo = '',
   });
 
   final String id;
@@ -40,6 +43,26 @@ class Descarga {
   /// Direccion del archivo en si, cuando el navegador la vio pasar mientras la
   /// pagina reproducia el video. Vacia para YouTube, que se resuelve solo.
   final String urlMedia;
+
+  /// Las demas direcciones que se vieron pasar, de mejor a peor.
+  ///
+  /// Quedarse con una sola era rendirse antes de tiempo: cuando esa caduca o
+  /// el servidor la rechaza, muchas veces la siguiente si vale.
+  final List<String> candidatas;
+
+  /// Cuando la propia web dispara una descarga, lo que llega no es un video de
+  /// una red social sino un archivo cualquiera: se guarda tal cual.
+  final bool esArchivo;
+  final String nombreArchivo;
+
+  /// Todas las direcciones a probar, de mejor a peor y sin repetir.
+  List<String> get todasLasCandidatas {
+    final lista = <String>[];
+    for (final u in [urlMedia, ...candidatas]) {
+      if (u.isNotEmpty && !lista.contains(u)) lista.add(u);
+    }
+    return lista;
+  }
 
   /// Cookies de la pagina de donde salio. Muchos sitios rechazan la peticion
   /// si no llegan: es la forma que tienen de comprobar que eres tu.
@@ -113,12 +136,14 @@ class GestorDescargas extends ChangeNotifier {
     String autor = '',
     String miniatura = '',
     String urlMedia = '',
+    List<String> candidatas = const [],
     String cookies = '',
   }) {
     final d = Descarga(
       id: 'd${++_contador}_${DateTime.now().millisecondsSinceEpoch}',
       url: url,
       urlMedia: urlMedia,
+      candidatas: candidatas,
       cookies: cookies,
       busqueda: busqueda,
       tipo: tipo,
@@ -127,6 +152,41 @@ class GestorDescargas extends ChangeNotifier {
       titulo: titulo.isEmpty ? (busqueda.isEmpty ? sitioDe(url) : busqueda) : titulo,
       autor: autor,
       miniatura: miniatura,
+    );
+    _cola.insert(0, d);
+    notifyListeners();
+    _bombear();
+    return d;
+  }
+
+  /// Guarda un archivo que la propia web mando descargar.
+  ///
+  /// Es lo que pasa cuando el usuario le da al boton de descargar de una
+  /// pagina cualquiera: no hay video que buscar ni nada que convertir, solo
+  /// un archivo que traer y dejar en su sitio.
+  Descarga encolarArchivo({
+    required String url,
+    required String nombre,
+    String cookies = '',
+    String referente = '',
+    bool esAudio = false,
+  }) {
+    // en la lista y en la biblioteca se ensena el nombre sin la extension:
+    // "Concierto" se lee mejor que "Concierto.mp4"
+    final punto = nombre.lastIndexOf('.');
+    final visible = punto > 0 ? nombre.substring(0, punto) : nombre;
+
+    final d = Descarga(
+      id: 'a${++_contador}_${DateTime.now().millisecondsSinceEpoch}',
+      url: referente.isEmpty ? url : referente,
+      urlMedia: url,
+      cookies: cookies,
+      tipo: esAudio ? TipoMedio.audio : TipoMedio.completo,
+      calidad: 'mejor',
+      formatoAudio: ajustes.formatoAudio,
+      titulo: visible,
+      esArchivo: true,
+      nombreArchivo: nombre,
     );
     _cola.insert(0, d);
     notifyListeners();
@@ -198,6 +258,11 @@ class GestorDescargas extends ChangeNotifier {
   Future<void> _procesar(Descarga d) async {
     _enMarcha++;
     try {
+      // un archivo que mando bajar la propia web: ni se busca ni se convierte
+      if (d.esArchivo) {
+        await _bajarArchivo(d).timeout(const Duration(hours: 3));
+        return;
+      }
       // YouTube se resuelve solo y da la mejor calidad, con el sonido aparte.
       if (MotorLocal.puedeSolo(d.url)) {
         try {
@@ -348,7 +413,8 @@ class GestorDescargas extends ChangeNotifier {
     d.progreso = 1;
     notifyListeners();
 
-    var media = d.urlMedia;
+    final medios = d.todasLasCandidatas;
+    var media = medios.isEmpty ? '' : medios.first;
     var titulo = d.titulo;
 
     var galletas = d.cookies;
@@ -359,6 +425,7 @@ class GestorDescargas extends ChangeNotifier {
           .timeout(const Duration(seconds: 30), onTimeout: () => null);
       if (hallado != null && hallado.vale) {
         media = hallado.url;
+        medios.add(hallado.url);
         if (titulo.isEmpty || titulo == sitioDe(d.url)) {
           if (hallado.titulo.isNotEmpty) titulo = hallado.titulo;
         }
@@ -383,6 +450,7 @@ class GestorDescargas extends ChangeNotifier {
         d.progreso = 5;
         notifyListeners();
         media = oculta.url;
+        medios.addAll(oculta.candidatas);
         if (galletas.isEmpty) galletas = oculta.cookies;
         if ((titulo.isEmpty || titulo == sitioDe(d.url)) &&
             oculta.titulo.isNotEmpty) {
@@ -402,19 +470,44 @@ class GestorDescargas extends ChangeNotifier {
     final carpeta = await GestorDescargas.carpetaDeGuardado(
         d.esAudio, ajustes.guardarEnPublico);
 
+    // por orden: la que mejor pinta tiene primero, y si esa no vale se sigue
+    // con la siguiente. Antes se probaba una sola y ahi se acababa todo.
+    final porProbar = <String>[media];
+    for (final u in medios) {
+      if (!porProbar.contains(u)) porProbar.add(u);
+    }
+
     try {
-      final archivo = await _local.descargarMedio(
-        urlMedia: media,
-        titulo: titulo,
-        tipo: d.tipo,
-        formatoAudio: d.formatoAudio,
-        carpeta: carpeta,
-        referente: d.url,
-        cookies: galletas,
-        reforzarAudio: d.esAudio && ajustes.modoMusica,
-        cancelado: () => d.estado == EstadoDescarga.cancelada || d.pausada,
-        alProgresar: _avisarDelAvance(d),
-      );
+      String? archivo;
+      Object? ultimoFallo;
+      for (var i = 0; i < porProbar.length && i < 4; i++) {
+        if (i > 0) {
+          if (d.estado == EstadoDescarga.cancelada || d.pausada) break;
+          d.detalle = 'Probando otra direccion';
+          notifyListeners();
+        }
+        try {
+          archivo = await _local.descargarMedio(
+            urlMedia: porProbar[i],
+            titulo: titulo,
+            tipo: d.tipo,
+            formatoAudio: d.formatoAudio,
+            carpeta: carpeta,
+            referente: d.url,
+            cookies: galletas,
+            reforzarAudio: d.esAudio && ajustes.modoMusica,
+            cancelado: () => d.estado == EstadoDescarga.cancelada || d.pausada,
+            alProgresar: _avisarDelAvance(d),
+          );
+          break;
+        } catch (e) {
+          if (d.estado == EstadoDescarga.cancelada || d.pausada) rethrow;
+          ultimoFallo = e;
+        }
+      }
+      if (archivo == null) {
+        throw ultimoFallo ?? ErrorCaudal('No se pudo traer ese video.');
+      }
 
       final tamano = await File(archivo).length();
       d.archivo = archivo;
@@ -456,6 +549,81 @@ class GestorDescargas extends ChangeNotifier {
     }
   }
 
+
+  /// Trae un archivo tal cual, sin buscarlo ni convertirlo.
+  ///
+  /// Es el camino de las descargas que dispara la propia web. Aqui no hay nada
+  /// que adivinar: el sitio ya dijo que archivo quiere que se baje.
+  Future<void> _bajarArchivo(Descarga d) async {
+    d.estado = EstadoDescarga.descargando;
+    d.detalle = 'Descargando';
+    d.progreso = 1;
+    notifyListeners();
+
+    final esMedia = d.esAudio || _pareceMedia(d.nombreArchivo);
+    final carpeta = await GestorDescargas.carpetaDeGuardado(
+      d.esAudio,
+      ajustes.guardarEnPublico,
+      subcarpeta: esMedia ? null : 'Archivos',
+    );
+
+    try {
+      final archivo = await _local.descargarArchivo(
+        url: d.urlMedia,
+        nombre: d.nombreArchivo,
+        carpeta: carpeta,
+        referente: d.url,
+        cookies: d.cookies,
+        cancelado: () => d.estado == EstadoDescarga.cancelada || d.pausada,
+        alProgresar: _avisarDelAvance(d),
+      );
+
+      final tamano = await File(archivo).length();
+      d.archivo = archivo;
+      d.bytesRecibidos = tamano;
+      d.bytesTotales = tamano;
+      d.progreso = 100;
+      d.estado = EstadoDescarga.completada;
+      d.detalle = 'Guardado en el telefono';
+
+      // en la biblioteca solo entra lo que se puede reproducir
+      if (esMedia) {
+        await almacen.guardar(Pista(
+          id: 0,
+          titulo: d.titulo,
+          autor: d.autor,
+          archivo: archivo,
+          miniatura: d.miniatura,
+          duracion: d.duracion,
+          tamano: tamano,
+          origen: d.url,
+          esAudio: d.esAudio,
+          fecha: DateTime.now().millisecondsSinceEpoch,
+        ));
+      }
+
+      notifyListeners();
+      if (!_terminadas.isClosed) _terminadas.add(d);
+    } catch (e) {
+      if (d.estado == EstadoDescarga.cancelada) {
+        d.detalle = 'Cancelada';
+        notifyListeners();
+        return;
+      }
+      if (d.pausada) {
+        d.estado = EstadoDescarga.pausada;
+        d.detalle = 'En pausa';
+        notifyListeners();
+        return;
+      }
+      rethrow;
+    }
+  }
+
+  static bool _pareceMedia(String nombre) => RegExp(
+        r'\.(mp4|m4v|mov|mkv|webm|avi|flv|mp3|m4a|aac|ogg|opus|flac|wav)$',
+        caseSensitive: false,
+      ).hasMatch(nombre);
 
   // ---------------------------------------------------------------- control
 
@@ -544,8 +712,12 @@ class GestorDescargas extends ChangeNotifier {
 
   /// Dónde se guarda: en la carpeta pública si se puede, si no en la de la app.
 
-  static Future<Directory> carpetaDeGuardado(bool audio, bool preferirPublico) async {
-    final sub = audio ? 'Musica' : 'Videos';
+  static Future<Directory> carpetaDeGuardado(
+    bool audio,
+    bool preferirPublico, {
+    String? subcarpeta,
+  }) async {
+    final sub = subcarpeta ?? (audio ? 'Musica' : 'Videos');
 
     if (preferirPublico && Platform.isAndroid) {
       for (final base in ['/storage/emulated/0/Download', '/sdcard/Download']) {

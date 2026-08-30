@@ -106,6 +106,55 @@ página**, y no aparece en portadas, perfiles ni búsquedas, para no molestar.
 Si un sitio no se reconoce, el botón de descarga de la barra inferior sigue
 sirviendo para probar con la página actual.
 
+### Por qué el navegador es propio y no el de siempre
+
+La app llevaba dentro el visor de páginas estándar de Flutter (`webview_flutter`).
+Enseña webs perfectamente, pero no deja hacer ninguna de las cinco cosas que
+hacen falta para descargar de una web moderna:
+
+| Lo que hace falta | El visor de siempre | El navegador propio |
+|---|---|---|
+| Ver pasar las peticiones de la página | no | sí, todas |
+| Ver las que salen de un *worker* o del *service worker* | no | sí |
+| Plantar el detector antes de que arranque el JavaScript del sitio | no | sí, en cada marco |
+| Leer las cookies de sesión (las `HttpOnly`) | no | sí |
+| Atender lo que la propia web manda descargar | no | sí |
+
+Las consecuencias eran concretas: el detector entraba tarde y la página ya se
+había quedado con su propia copia de `fetch`; los videos dentro de un `<iframe>`
+no se veían nunca; y como las cookies se leían con `document.cookie` —que por
+diseño no ve las de sesión— muchas descargas terminaban en **403**. Y pulsar el
+botón de descargar de cualquier página no hacía absolutamente nada, porque ese
+aviso el visor no lo da.
+
+Contra un banco de pruebas con los siete montajes que usan las webs de verdad
+(video suelto, dentro de un iframe, por trozos con MSE, pedido desde un worker,
+servido por un service worker, detrás de una cookie de sesión, y con la página
+guardándose `fetch` antes que nadie), midiendo **si el archivo se descarga de
+verdad**, no si se detecta:
+
+```
+                                    antes      ahora
+video normal en la pagina           baja       baja
+video dentro de un iframe           no lo ve   baja
+reproductor por trozos (MSE)        no lo ve   baja
+el video lo pide un worker          no lo ve   baja
+lo sirve un service worker          404        baja
+hace falta la cookie de sesion      403        baja
+la pagina se guarda fetch antes     no lo ve   baja
+------------------------------------------------------
+DESCARGADOS DE VERDAD               1 de 7     7 de 7
+```
+
+El navegador propio además abre en pestañas lo que la página pide con
+`target="_blank"` (antes esos enlaces no hacían nada), guarda los archivos que
+la web arma ella misma en memoria, y cuando una dirección no sirve prueba con
+las siguientes que vio pasar en vez de rendirse en la primera.
+
+Detalle de compilación: el plugin del navegador todavía usa la forma antigua de
+declarar sus reglas de ProGuard, que la versión 9 de las herramientas de Android
+rechaza. Por eso el proyecto compila con la 8.13, que es la última que la acepta.
+
 ### Modo música: que suene más fuerte
 
 En **Ajustes → Modo música** se activa el volumen alto. Hace dos cosas:

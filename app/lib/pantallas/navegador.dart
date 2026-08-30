@@ -1,15 +1,18 @@
 import 'dart:async';
 import 'dart:convert';
+import 'dart:io';
 
 import 'package:flutter/material.dart';
-import 'package:webview_flutter/webview_flutter.dart';
+import 'package:flutter_inappwebview/flutter_inappwebview.dart';
 
 import '../main.dart';
 import '../nucleo/captura.dart';
 import '../nucleo/deteccion.dart';
+import '../nucleo/descargas.dart';
 import '../nucleo/formato.dart';
 import '../nucleo/modelos.dart';
 import '../nucleo/motor_local.dart';
+import '../nucleo/navegador_caudal.dart';
 import '../nucleo/tema.dart';
 import '../widgets/barra_rapida.dart';
 import '../widgets/comunes.dart';
@@ -28,8 +31,16 @@ const _sugeridos = [
   ('Twitch', 'https://www.twitch.tv', Icons.videogame_asset_rounded, Color(0xFF9146FF)),
 ];
 
-/// Navegador propio: al entrar en un video aparecen solos los botones para
-/// bajarlo en video o en audio, sin tener que buscar nada en un menú.
+/// Cuantas pestanas se dejan abrir a la vez.
+///
+/// Cada una es un navegador entero corriendo: pasado cierto punto el telefono
+/// empieza a cerrarlas por su cuenta y se pierde lo que hubiera en ellas.
+const int _topeDePestanas = 8;
+
+/// El navegador de Caudal.
+///
+/// Al entrar en un video aparecen solos los botones para bajarlo, y lo que la
+/// propia web mande descargar se recoge tambien.
 class VistaNavegador extends StatefulWidget {
   const VistaNavegador({super.key});
 
@@ -37,307 +48,203 @@ class VistaNavegador extends StatefulWidget {
   State<VistaNavegador> createState() => _VistaNavegadorState();
 }
 
-class _VistaNavegadorState extends State<VistaNavegador> with AutomaticKeepAliveClientMixin {
-  late final WebViewController _web;
+class _VistaNavegadorState extends State<VistaNavegador>
+    with AutomaticKeepAliveClientMixin {
   final _direccion = TextEditingController();
   final _focoDireccion = FocusNode();
 
-  String _urlActual = '';
-  String _titulo = '';
-  int _progreso = 0;
-  bool _cargando = false;
-  bool _arrancado = false;
-  final List<MedioCapturado> _mediosDetectados = [];
-
-  // --- barra de descarga rápida
-  Ficha? _ficha;
-  bool _resolviendo = false;
-  bool _ocultaPorElUsuario = false;
-  String _urlDeLaFicha = '';
-  int _peticion = 0;
+  NavegadorCaudal? _nav;
+  StreamSubscription<PeticionDescarga>? _escuchaDescargas;
   Timer? _retardo;
-  Timer? _reinyeccion;
+  int _peticion = 0;
   bool _buscandoMedia = false;
 
   @override
   bool get wantKeepAlive => true;
 
   @override
-  void initState() {
-    super.initState();
-    _web = WebViewController()
-      ..setJavaScriptMode(JavaScriptMode.unrestricted)
-      ..setBackgroundColor(Tono.fondo)
-      ..setUserAgent(
-        // sin esto, algunas webs sirven una version movil recortada sin video
-        'Mozilla/5.0 (Linux; Android 13) AppleWebKit/537.36 (KHTML, like Gecko) '
-        'Chrome/124.0.0.0 Mobile Safari/537.36',
-      )
-      ..addJavaScriptChannel('CaudalMedios', onMessageReceived: _mediosEncontrados)
-      ..addJavaScriptChannel('CaudalRuta', onMessageReceived: _rutaCambiada)
-      ..setNavigationDelegate(NavigationDelegate(
-        onProgress: (p) => setState(() => _progreso = p),
-        onPageStarted: (url) {
-          setState(() {
-            _cargando = true;
-            _mediosDetectados.clear();
-          });
-          // cuanto antes se enganche, mas peticiones de video vemos pasar
-          _web.runJavaScript(guionCaptura);
-          _cambiarUrl(url);
-        },
-        onPageFinished: (url) async {
-          setState(() => _cargando = false);
-          _cambiarUrl(url);
-          final t = await _web.getTitle();
-          if (mounted) setState(() => _titulo = t ?? '');
-          _vigilarRuta();
-          _insistirConLaCaptura();
-          _buscarMedios();
-        },
-        onWebResourceError: (e) {
-          if (e.isForMainFrame == true && mounted) {
-            setState(() => _cargando = false);
-          }
-        },
-      ));
+  void didChangeDependencies() {
+    super.didChangeDependencies();
+    final navegador = Servicios.de(context).navegador;
+    if (identical(navegador, _nav)) return;
+    _nav?.removeListener(_alCambiarPestanas);
+    _escuchaDescargas?.cancel();
+    _nav = navegador;
+    navegador.addListener(_alCambiarPestanas);
+    navegador.preparar();
+    _escuchaDescargas = navegador.alPedirDescarga.listen(_atenderDescargaWeb);
   }
 
   @override
   void dispose() {
     _retardo?.cancel();
-    _reinyeccion?.cancel();
+    _escuchaDescargas?.cancel();
+    _nav?.removeListener(_alCambiarPestanas);
     _direccion.dispose();
     _focoDireccion.dispose();
     super.dispose();
   }
 
-  // ---------------------------------------------------------------- detección
-
-  /// YouTube y compañía cambian de video sin recargar la página, así que hay
-  /// que vigilar el historial para enterarse.
-  void _vigilarRuta() {
-    _web.runJavaScript('''
-      (function () {
-        if (window.__caudalRuta) return;
-        window.__caudalRuta = true;
-        var ultima = location.href;
-        function avisar() {
-          if (location.href !== ultima) {
-            ultima = location.href;
-            try { CaudalRuta.postMessage(ultima); } catch (e) {}
-          }
-        }
-        var ps = history.pushState, rs = history.replaceState;
-        history.pushState = function () { ps.apply(history, arguments); setTimeout(avisar, 80); };
-        history.replaceState = function () { rs.apply(history, arguments); setTimeout(avisar, 80); };
-        window.addEventListener('popstate', function () { setTimeout(avisar, 80); });
-        setInterval(avisar, 900);
-      })();
-    ''');
+  void _alCambiarPestanas() {
+    if (!mounted) return;
+    setState(() {});
+    _sincronizarDireccion();
   }
 
-  void _rutaCambiada(JavaScriptMessage mensaje) {
-    _cambiarUrl(mensaje.message);
-    _web.getTitle().then((t) {
-      if (mounted && t != null) setState(() => _titulo = t);
-    });
+  NavegadorCaudal get _navegador => _nav!;
+  Pestana get _pestana => _navegador.activa;
+
+  void _sincronizarDireccion() {
+    final url = _pestana.url;
+    if (_focoDireccion.hasFocus) return;
+    if (_direccion.text != url) _direccion.text = url;
   }
 
-  /// Punto único por el que pasa cualquier cambio de dirección.
-  void _cambiarUrl(String url) {
-    if (url == _urlActual) return;
-    setState(() {
-      _urlActual = url;
-      _direccion.text = url;
-      _ocultaPorElUsuario = false;
-      if (_urlDeLaFicha != url) {
-        _ficha = null;
-        _urlDeLaFicha = '';
-      }
-    });
-    _programarResolucion();
+  // ---------------------------------------------------------------- deteccion
+
+  /// Punto unico por el que pasa cualquier cambio de direccion.
+  void _cambiarUrl(Pestana pestana, String url) {
+    if (url.isEmpty || url == pestana.url) return;
+
+    // Al pasar de un reel al siguiente, o de un video de YouTube a otro, la
+    // pagina no se recarga: cambia la direccion y ya. Si no se olvidan los
+    // medios del anterior, el boton de descargar baja el video equivocado.
+    // Los saltos que solo cambian parametros no cuentan: ahi seguimos en lo
+    // mismo y tirar lo capturado seria perderlo por nada.
+    if (_esOtraPagina(pestana.url, url)) pestana.olvidarMedios();
+
+    pestana.barraOculta = false;
+    if (pestana.urlDeLaFicha != url) {
+      pestana.ficha = null;
+      pestana.urlDeLaFicha = '';
+    }
+    pestana.cambiar(url: url);
+    if (identical(pestana, _pestana)) {
+      _sincronizarDireccion();
+      _programarResolucion();
+    }
   }
 
-  /// Mira de qué va la página, con un respiro para no disparar una consulta
-  /// por cada rebote de navegación.
+  /// Mira de que va la pagina, con un respiro para no disparar una consulta
+  /// por cada rebote de navegacion.
   void _programarResolucion() {
     _retardo?.cancel();
-    if (!pareceDescargable(_urlActual)) {
-      setState(() => _resolviendo = false);
+    final pestana = _pestana;
+    if (!pareceDescargable(pestana.url)) {
+      if (pestana.resolviendo) {
+        pestana.resolviendo = false;
+        pestana.refrescar();
+      }
       return;
     }
-    setState(() => _resolviendo = true);
+    pestana.resolviendo = true;
+    pestana.refrescar();
     _retardo = Timer(const Duration(milliseconds: 700), _resolver);
   }
 
   Future<void> _resolver() async {
-    final url = _urlActual;
+    final pestana = _pestana;
+    final url = pestana.url;
     final mio = ++_peticion;
+    Ficha? ficha;
     try {
       // YouTube da titulo, autor y calidades de verdad; el resto de sitios se
       // resuelven con lo que el navegador ya sabe de la pagina
-      final ficha = await Servicios.de(context).descargas.resolverSiPuede(url);
-      if (!mounted || mio != _peticion || url != _urlActual) return;
-      setState(() {
-        _ficha = ficha ?? Ficha(url: url, titulo: _titulo, plataforma: sitioDe(url));
-        _urlDeLaFicha = url;
-        _resolviendo = false;
-      });
+      ficha = await Servicios.de(context).descargas.resolverSiPuede(url);
     } catch (_) {
-      if (!mounted || mio != _peticion) return;
       // sin datos, pero la barra sigue: el video se baja igual con lo capturado
-      setState(() {
-        _ficha = Ficha(url: url, titulo: _titulo, plataforma: sitioDe(url));
-        _urlDeLaFicha = url;
-        _resolviendo = false;
-      });
+      ficha = null;
     }
+    if (!mounted || mio != _peticion || url != pestana.url) return;
+    pestana.ficha =
+        ficha ?? Ficha(url: url, titulo: pestana.titulo, plataforma: sitioDe(url));
+    pestana.urlDeLaFicha = url;
+    pestana.resolviendo = false;
+    pestana.refrescar();
   }
 
-  /// Vuelve a plantar el guión de captura varias veces seguidas.
-  ///
-  /// Una sola inyección no basta: según cuándo entre, la página todavía no ha
-  /// terminado de montarse y el enganche se pierde. Insistir unos segundos
-  /// cuesta nada y es la diferencia entre ver pasar el video o no verlo.
-  void _insistirConLaCaptura() {
-    _reinyeccion?.cancel();
-    var veces = 0;
-    _web.runJavaScript(guionCaptura);
-    _reinyeccion = Timer.periodic(const Duration(milliseconds: 900), (t) {
-      if (!mounted || ++veces > 8) {
-        t.cancel();
-        return;
-      }
-      _web.runJavaScript(guionCaptura);
-    });
-  }
-
-  /// Pregunta a la página qué videos o audios tiene cargados.
-  void _buscarMedios() {
-    _web.runJavaScript('''
-      (function () {
-        try {
-          var vistos = [];
-          document.querySelectorAll('video, audio, source').forEach(function (n) {
-            var s = n.currentSrc || n.src || '';
-            if (s && s.indexOf('blob:') !== 0 && vistos.indexOf(s) < 0) vistos.push(s);
-          });
-          if (vistos.length) CaudalMedios.postMessage(JSON.stringify(vistos));
-        } catch (e) {}
-      })();
-    ''');
-  }
-
-  void _mediosEncontrados(JavaScriptMessage mensaje) {
+  /// Si las dos direcciones son de verdad paginas distintas.
+  static bool _esOtraPagina(String antes, String ahora) {
+    if (antes.isEmpty) return false;
     try {
-      final datos = jsonDecode(mensaje.message);
-      if (!mounted) return;
-
-      // el guion nuevo manda un objeto por medio; el repaso del DOM, una lista
-      final nuevos = <MedioCapturado>[];
-      if (datos is Map) {
-        final u = (datos['url'] ?? '').toString();
-        if (u.startsWith('http')) {
-          nuevos.add(MedioCapturado(u, (datos['origen'] ?? '').toString()));
-        }
-      } else if (datos is List) {
-        for (final x in datos) {
-          final u = x.toString();
-          if (u.startsWith('http')) nuevos.add(MedioCapturado(u, 'dom'));
-        }
-      }
-      if (nuevos.isEmpty) return;
-
-      final yaEstan = _mediosDetectados.map((m) => m.url).toSet();
-      setState(() {
-        _mediosDetectados.addAll(nuevos.where((m) => !yaEstan.contains(m.url)));
-      });
-    } catch (_) {
-      // si la pagina devuelve algo raro, seguimos sin medios detectados
+      final a = Uri.parse(antes);
+      final b = Uri.parse(ahora);
+      if (a.host != b.host || a.path != b.path) return true;
+      // youtube.com/watch?v=... : el video va en el parametro, no en la ruta
+      return a.queryParameters['v'] != b.queryParameters['v'];
+    } on FormatException {
+      return antes != ahora;
     }
   }
 
-  bool get _barraVisible =>
-      _arrancado &&
-      !_ocultaPorElUsuario &&
-      (_resolviendo || _ficha != null) &&
-      pareceDescargable(_urlActual);
+  bool get _barraVisible {
+    final p = _pestana;
+    return !p.vacia &&
+        !p.barraOculta &&
+        (p.resolviendo || p.ficha != null) &&
+        pareceDescargable(p.url);
+  }
 
   // ---------------------------------------------------------------- descargas
 
-  /// Descarga sin preguntar nada: la mejor calidad que haya.
-  /// La mejor dirección de las que vimos pasar mientras la página reproducía.
+  /// Las cookies de sesion de la pagina que se esta viendo.
   ///
-  /// En YouTube su motor va primero, porque da mejor calidad. Pero lo que
-  /// hayamos visto pasar se manda igual: sirve de respaldo cuando el motor
-  /// falla, que es lo que ocurre con los videos con restricción de edad.
-  ///
-  /// Si todavía no hemos visto pasar nada, se empuja al video a arrancar y se
-  /// espera un momento: casi siempre con eso aparece.
-  /// Las cookies de la pagina que se esta viendo.
-  ///
-  /// Sin ellas muchos sitios responden 403 a la descarga: es como se aseguran
-  /// de que quien pide el video es el mismo que estaba viendo la pagina.
-  Future<String> _cookiesDeLaPagina() async {
-    try {
-      final r = await _web.runJavaScriptReturningResult('document.cookie');
-      final texto = r.toString();
-      // el resultado viene entrecomillado y con las comillas escapadas
-      return texto
-          .replaceAll(RegExp(r'^"|"$'), '')
-          .replaceAll(r'\"', '"')
-          .trim();
-    } catch (_) {
-      return '';
-    }
-  }
+  /// Se piden al navegador, no a la pagina: las que de verdad autorizan la
+  /// descarga van marcadas HttpOnly y `document.cookie` no las ve. Con las de
+  /// la pagina, Instagram y compania responden 403.
+  Future<String> _cookiesDeLaPagina() =>
+      NavegadorCaudal.cookiesDe(_pestana.url);
 
-  Future<String> _mediaParaDescargar(TipoMedio tipo) async {
-    var mejor = mejorCapturado(_mediosDetectados, paraAudio: tipo == TipoMedio.audio);
-    if (mejor != null) return mejor.url;
+  /// Las direcciones vistas, de mejor a peor.
+  ///
+  /// Si todavia no hemos visto pasar nada, se empuja al video a arrancar y se
+  /// espera un momento: casi siempre con eso aparece.
+  Future<List<String>> _mediosParaDescargar(TipoMedio tipo) async {
+    final pestana = _pestana;
+    final paraAudio = tipo == TipoMedio.audio;
+
+    List<String> deLoVisto() => candidatasOrdenadas(pestana.medios, paraAudio: paraAudio)
+        .map((m) => m.url)
+        .toList();
+
+    if (pestana.medios.isNotEmpty) return deLoVisto();
 
     // en YouTube no se insiste ni se despierta nada: su motor va primero
-    if (MotorLocal.puedeSolo(_urlActual)) return '';
+    if (MotorLocal.puedeSolo(pestana.url)) return const [];
 
-    // nada capturado: le damos un empujón al reproductor y esperamos
-    await _web.runJavaScript(guionCaptura);
-    await _web.runJavaScript(guionDespertar);
+    // nada capturado: le damos un empujon al reproductor y esperamos
+    await pestana.web?.evaluateJavascript(source: guionDespertar);
 
     for (var intento = 0; intento < 12; intento++) {
       await Future<void>.delayed(const Duration(milliseconds: 400));
-      if (!mounted) return '';
-      mejor = mejorCapturado(_mediosDetectados, paraAudio: tipo == TipoMedio.audio);
-      if (mejor != null) return mejor.url;
-      // cada tanto, otro repaso por si el video acaba de aparecer
-      if (intento == 5) _buscarMedios();
+      if (!mounted) return const [];
+      if (pestana.medios.isNotEmpty) return deLoVisto();
+      if (intento == 5) {
+        await pestana.web?.evaluateJavascript(source: guionDespertar);
+      }
     }
-    return '';
+    return const [];
   }
 
   Future<void> _descargarDirecto(TipoMedio tipo) async {
     final servicios = Servicios.de(context);
-    if (_urlActual.isEmpty || _buscandoMedia) return;
+    final pestana = _pestana;
+    if (pestana.url.isEmpty || _buscandoMedia) return;
 
-    final esYoutube = MotorLocal.puedeSolo(_urlActual);
-    if (!esYoutube && _mediosDetectados.isEmpty) {
+    final esYoutube = MotorLocal.puedeSolo(pestana.url);
+    if (!esYoutube && pestana.medios.isEmpty) {
       setState(() => _buscandoMedia = true);
       avisar(context, 'Buscando el video en la pagina...');
     }
 
-    final media = await _mediaParaDescargar(tipo);
+    final medios = await _mediosParaDescargar(tipo);
     if (!mounted) return;
     setState(() => _buscandoMedia = false);
 
-    if (!esYoutube && media.isEmpty) {
-      // el numero dice si el problema es que no vemos nada pasar o que lo que
-      // pasa no nos sirve; sin eso no hay forma de saber por donde falla
+    if (!esYoutube && medios.isEmpty) {
       avisar(
         context,
-        _mediosDetectados.isEmpty
-            ? 'No se vio pasar ningun video. Dale al play y vuelve a intentarlo.'
-            : 'Se vieron ${_mediosDetectados.length} archivos pero ninguno servia. '
-                'Prueba a darle al play.',
+        'No se vio pasar ningun video. Dale al play y vuelve a intentarlo.',
         esError: true,
       );
       return;
@@ -347,15 +254,18 @@ class _VistaNavegadorState extends State<VistaNavegador> with AutomaticKeepAlive
     if (!mounted) return;
 
     servicios.descargas.encolar(
-      url: _urlActual,
-      urlMedia: media,
+      url: pestana.url,
+      urlMedia: medios.isEmpty ? '' : medios.first,
+      candidatas: medios,
       cookies: galletas,
       tipo: tipo,
       calidad: 'mejor',
       formatoAudio: servicios.ajustes.formatoAudio,
-      titulo: _ficha?.titulo.isNotEmpty == true ? _ficha!.titulo : _titulo,
-      autor: _ficha?.autor ?? '',
-      miniatura: _ficha?.miniatura ?? '',
+      titulo: pestana.ficha?.titulo.isNotEmpty == true
+          ? pestana.ficha!.titulo
+          : pestana.titulo,
+      autor: pestana.ficha?.autor ?? '',
+      miniatura: pestana.ficha?.miniatura ?? '',
     );
 
     avisar(
@@ -368,36 +278,124 @@ class _VistaNavegadorState extends State<VistaNavegador> with AutomaticKeepAlive
 
   Future<void> _abrirOpciones() async {
     final servicios = Servicios.de(context);
-    if (_urlActual.isEmpty) return;
+    final pestana = _pestana;
+    if (pestana.url.isEmpty) return;
 
     final eleccion = await mostrarHojaDescarga(
       context,
-      url: _urlActual,
+      url: pestana.url,
       descargas: servicios.descargas,
       ajustes: servicios.ajustes,
-      fichaConocida: _ficha,
+      fichaConocida: pestana.ficha,
     );
     if (eleccion == null || !mounted) return;
 
     // lo que vimos pasar en la pagina vale igual desde aqui
-    final media = await _mediaParaDescargar(eleccion.tipo);
+    final medios = await _mediosParaDescargar(eleccion.tipo);
     final galletas = await _cookiesDeLaPagina();
     if (!mounted) return;
 
     encolarYAvisar(
       context,
       gestor: servicios.descargas,
-      url: _urlActual,
-      urlMedia: media,
+      url: pestana.url,
+      urlMedia: medios.isEmpty ? '' : medios.first,
+      candidatas: medios,
       cookies: galletas,
       tipo: eleccion.tipo,
       calidad: eleccion.calidad,
       formatoAudio: eleccion.formatoAudio,
-      titulo: eleccion.ficha.titulo.isNotEmpty ? eleccion.ficha.titulo : _titulo,
+      titulo: eleccion.ficha.titulo.isNotEmpty
+          ? eleccion.ficha.titulo
+          : pestana.titulo,
       autor: eleccion.ficha.autor,
       miniatura: eleccion.ficha.miniatura,
     );
   }
+
+  /// Lo que la propia web mando descargar.
+  ///
+  /// Antes esto no ocurria nunca: el visor de siempre no avisa de las
+  /// descargas, asi que pulsar el boton de descargar de cualquier pagina no
+  /// hacia absolutamente nada.
+  Future<void> _atenderDescargaWeb(PeticionDescarga peticion) async {
+    if (!mounted) return;
+    final servicios = Servicios.de(context);
+    // el archivo casi nunca sale del mismo dominio que la pagina: las cookies
+    // que valen son las del servidor que lo sirve, y si ahi no hay ninguna,
+    // las de la pagina desde la que se pidio
+    var galletas = await NavegadorCaudal.cookiesDe(peticion.url);
+    if (galletas.isEmpty && peticion.referente.isNotEmpty) {
+      galletas = await NavegadorCaudal.cookiesDe(peticion.referente);
+    }
+    if (!mounted) return;
+
+    final nombre = peticion.nombre.isNotEmpty
+        ? peticion.nombre
+        : _nombreDeLaUrl(peticion.url);
+
+    servicios.descargas.encolarArchivo(
+      url: peticion.url,
+      nombre: nombre,
+      cookies: galletas,
+      referente: peticion.referente,
+      esAudio: peticion.esAudio,
+    );
+
+    avisar(context, 'Bajando $nombre');
+  }
+
+  /// Un archivo que la pagina armo ella misma y nos entrega ya hecho.
+  Future<void> _guardarArchivoDeLaPagina(String mensaje) async {
+    Map<String, dynamic> datos;
+    try {
+      datos = Map<String, dynamic>.from(jsonDecode(mensaje) as Map);
+    } catch (_) {
+      return;
+    }
+    final contenido = '${datos['datos'] ?? ''}';
+    if (contenido.isEmpty || !mounted) return;
+
+    final nombre = '${datos['nombre'] ?? 'descarga'}';
+    try {
+      final bytes = base64Decode(contenido);
+      final ajustes = Servicios.de(context).ajustes;
+      final esAudio = RegExp(r'\.(mp3|m4a|aac|ogg|opus|flac|wav)$',
+              caseSensitive: false)
+          .hasMatch(nombre);
+      final esMedia = esAudio ||
+          RegExp(r'\.(mp4|m4v|mov|mkv|webm|avi|flv)$', caseSensitive: false)
+              .hasMatch(nombre);
+      final carpeta = await GestorDescargas.carpetaDeGuardado(
+        esAudio,
+        ajustes.guardarEnPublico,
+        subcarpeta: esMedia ? null : 'Archivos',
+      );
+      final ruta = await MotorLocal().guardarBytes(
+        datos: bytes,
+        nombre: nombre,
+        carpeta: carpeta,
+      );
+      if (!mounted) return;
+      avisar(context, 'Guardado ${ruta.split(Platform.pathSeparator).last}');
+    } catch (_) {
+      if (mounted) {
+        avisar(context, 'No se pudo guardar ese archivo', esError: true);
+      }
+    }
+  }
+
+  static String _nombreDeLaUrl(String url) {
+    try {
+      final partes = Uri.parse(url).pathSegments;
+      if (partes.isNotEmpty && partes.last.isNotEmpty) return partes.last;
+    } catch (_) {
+      // una direccion rara: se le pone un nombre y ya
+    }
+    return 'descarga';
+  }
+
+  // ---------------------------------------------------------------- navegar
 
   void _ir(String entrada) {
     final texto = entrada.trim();
@@ -406,8 +404,10 @@ class _VistaNavegadorState extends State<VistaNavegador> with AutomaticKeepAlive
         ? normalizarEnlace(texto)
         : 'https://www.google.com/search?q=${Uri.encodeQueryComponent(texto)}';
     _focoDireccion.unfocus();
-    setState(() => _arrancado = true);
-    _web.loadRequest(Uri.parse(url));
+    // en la portada todavia no hay navegador montado: al apuntar la direccion
+    // hay que reconstruir para que nazca ya cargandola
+    setState(() => _pestana.cargar(url));
+    _programarResolucion();
   }
 
   // ---------------------------------------------------------------- interfaz
@@ -415,6 +415,9 @@ class _VistaNavegadorState extends State<VistaNavegador> with AutomaticKeepAlive
   @override
   Widget build(BuildContext context) {
     super.build(context);
+    if (_nav == null) return const SizedBox.shrink();
+
+    final pestana = _pestana;
 
     return Scaffold(
       body: SafeArea(
@@ -422,133 +425,259 @@ class _VistaNavegadorState extends State<VistaNavegador> with AutomaticKeepAlive
         child: Column(
           children: [
             _barraDireccion(),
-            if (_cargando && _progreso < 100)
-              BarraProgreso(valor: _progreso / 100, alto: 2.5),
+            ListenableBuilder(
+              listenable: pestana,
+              builder: (context, _) => pestana.cargando && pestana.progreso < 100
+                  ? BarraProgreso(valor: pestana.progreso / 100, alto: 2.5)
+                  : const SizedBox(height: 2.5),
+            ),
             Expanded(
               child: Stack(
                 children: [
                   Positioned.fill(
-                    child: _arrancado ? WebViewWidget(controller: _web) : _portada(),
+                    child: IndexedStack(
+                      index: _navegador.indice,
+                      children: [
+                        for (final p in _navegador.pestanas) _lienzo(p),
+                      ],
+                    ),
                   ),
                   Positioned(
                     left: 0,
                     right: 0,
                     bottom: 0,
-                    child: BarraRapida(
-                      visible: _barraVisible,
-                      resolviendo: _resolviendo && _ficha == null,
-                      ficha: _ficha,
-                      tituloPagina: _titulo,
-                      priorizarAudio: esSitioDeAudio(_urlActual),
-                      alDescargarVideo: () => _descargarDirecto(TipoMedio.completo),
-                      alDescargarAudio: () => _descargarDirecto(TipoMedio.audio),
-                      alAbrirOpciones: _abrirOpciones,
-                      alCerrar: () => setState(() => _ocultaPorElUsuario = true),
+                    child: ListenableBuilder(
+                      listenable: pestana,
+                      builder: (context, _) => BarraRapida(
+                        visible: _barraVisible,
+                        resolviendo: pestana.resolviendo && pestana.ficha == null,
+                        ficha: pestana.ficha,
+                        tituloPagina: pestana.titulo,
+                        priorizarAudio: esSitioDeAudio(pestana.url),
+                        alDescargarVideo: () => _descargarDirecto(TipoMedio.completo),
+                        alDescargarAudio: () => _descargarDirecto(TipoMedio.audio),
+                        alAbrirOpciones: _abrirOpciones,
+                        alCerrar: () {
+                          pestana.barraOculta = true;
+                          pestana.refrescar();
+                        },
+                      ),
                     ),
                   ),
                 ],
               ),
             ),
-            if (_arrancado) _barraInferior(),
+            _barraInferior(),
           ],
         ),
       ),
     );
   }
 
-  Widget _barraDireccion() {
-    return Padding(
-      padding: const EdgeInsets.fromLTRB(12, 10, 12, 10),
-      child: SizedBox(
-        height: 44,
-        child: TextField(
-          controller: _direccion,
-          focusNode: _focoDireccion,
-          textInputAction: TextInputAction.go,
-          keyboardType: TextInputType.url,
-          onSubmitted: _ir,
-          style: const TextStyle(fontSize: 13.5),
-          decoration: InputDecoration(
-            contentPadding: const EdgeInsets.symmetric(horizontal: 14, vertical: 0),
-            hintText: 'Busca o escribe una dirección',
-            prefixIcon: Icon(
-              _urlActual.startsWith('https') ? Icons.lock_rounded : Icons.public_rounded,
-              size: 16,
-              color: _urlActual.startsWith('https') ? Tono.exito : Tono.texto3,
-            ),
-            prefixIconConstraints: const BoxConstraints(minWidth: 38),
-            suffixIcon: _direccion.text.isEmpty
-                ? null
-                : IconButton(
-                    icon: const Icon(Icons.refresh_rounded, size: 18),
-                    color: Tono.texto3,
-                    onPressed: _web.reload,
-                  ),
-          ),
-        ),
-      ),
+  /// Lo que se ve en una pestana: la portada o su navegador.
+  Widget _lienzo(Pestana pestana) {
+    if (pestana.vacia && pestana.windowId == null) return _portada();
+    return _VistaWeb(
+      key: ObjectKey(pestana),
+      pestana: pestana,
+      navegador: _navegador,
+      alCambiarUrl: (url) => _cambiarUrl(pestana, url),
+      alGuardarArchivo: _guardarArchivoDeLaPagina,
+      alPedirVentana: (url, windowId) {
+        if (_navegador.pestanas.length >= _topeDePestanas) {
+          avisar(context, 'Ya hay demasiadas pestanas abiertas', esError: true);
+          return false;
+        }
+        _navegador.abrir(url: url, windowId: windowId);
+        return true;
+      },
     );
   }
 
-  Widget _barraInferior() {
-    final hayMedios = _mediosDetectados.isNotEmpty;
-    return Container(
-      decoration: const BoxDecoration(
-        color: Tono.superficie,
-        border: Border(top: BorderSide(color: Tono.borde)),
-      ),
-      padding: const EdgeInsets.symmetric(horizontal: 4, vertical: 4),
+  Widget _barraDireccion() {
+    final pestana = _pestana;
+    return Padding(
+      padding: const EdgeInsets.fromLTRB(12, 10, 12, 6),
       child: Row(
-        mainAxisAlignment: MainAxisAlignment.spaceEvenly,
         children: [
-          IconButton(
-            onPressed: () async {
-              if (await _web.canGoBack()) _web.goBack();
-            },
-            icon: const Icon(Icons.arrow_back_ios_new_rounded, size: 19),
-            color: Tono.texto2,
-          ),
-          IconButton(
-            onPressed: () async {
-              if (await _web.canGoForward()) _web.goForward();
-            },
-            icon: const Icon(Icons.arrow_forward_ios_rounded, size: 19),
-            color: Tono.texto2,
-          ),
-          IconButton(
-            onPressed: () => setState(() {
-              _arrancado = false;
-              _ficha = null;
-            }),
-            icon: const Icon(Icons.home_rounded, size: 21),
-            color: Tono.texto2,
-          ),
-          IconButton(
-            onPressed: hayMedios ? _verMediosDetectados : null,
-            icon: Badge(
-              isLabelVisible: hayMedios,
-              label: Text('${_mediosDetectados.length}'),
-              backgroundColor: Tono.acento,
-              textColor: const Color(0xFF04202A),
-              child: const Icon(Icons.playlist_add_rounded, size: 21),
+          Expanded(
+            child: SizedBox(
+              height: 44,
+              child: TextField(
+                controller: _direccion,
+                focusNode: _focoDireccion,
+                textInputAction: TextInputAction.go,
+                keyboardType: TextInputType.url,
+                onSubmitted: _ir,
+                style: const TextStyle(fontSize: 13.5),
+                decoration: InputDecoration(
+                  contentPadding:
+                      const EdgeInsets.symmetric(horizontal: 14, vertical: 0),
+                  hintText: 'Busca o escribe una dirección',
+                  prefixIcon: Icon(
+                    pestana.url.startsWith('https')
+                        ? Icons.lock_rounded
+                        : Icons.public_rounded,
+                    size: 16,
+                    color: pestana.url.startsWith('https')
+                        ? Tono.exito
+                        : Tono.texto3,
+                  ),
+                  prefixIconConstraints: const BoxConstraints(minWidth: 38),
+                  suffixIcon: pestana.url.isEmpty
+                      ? null
+                      : IconButton(
+                          icon: const Icon(Icons.refresh_rounded, size: 18),
+                          color: Tono.texto3,
+                          onPressed: () => pestana.web?.reload(),
+                        ),
+                ),
+              ),
             ),
-            color: Tono.texto2,
-            disabledColor: Tono.texto3.withValues(alpha: 0.4),
-            tooltip: 'Medios sueltos de la página',
           ),
-          IconButton(
-            onPressed: _urlActual.isEmpty ? null : _abrirOpciones,
-            icon: const Icon(Icons.download_rounded, size: 22),
-            color: Tono.acento,
-            disabledColor: Tono.texto3.withValues(alpha: 0.4),
-            tooltip: 'Descargar esta página',
+          const SizedBox(width: 6),
+          _BotonPestanas(
+            cuantas: _navegador.pestanas.length,
+            alPulsar: _abrirListaDePestanas,
           ),
         ],
       ),
     );
   }
 
+  Widget _barraInferior() {
+    final pestana = _pestana;
+    return ListenableBuilder(
+      listenable: pestana,
+      builder: (context, _) {
+        final hayMedios = pestana.medios.isNotEmpty;
+        return Container(
+          decoration: const BoxDecoration(
+            color: Tono.superficie,
+            border: Border(top: BorderSide(color: Tono.borde)),
+          ),
+          padding: const EdgeInsets.symmetric(horizontal: 4, vertical: 4),
+          child: Row(
+            mainAxisAlignment: MainAxisAlignment.spaceEvenly,
+            children: [
+              IconButton(
+                onPressed: pestana.puedeAtras ? () => pestana.web?.goBack() : null,
+                icon: const Icon(Icons.arrow_back_ios_new_rounded, size: 19),
+                color: Tono.texto2,
+                disabledColor: Tono.texto3.withValues(alpha: 0.4),
+              ),
+              IconButton(
+                onPressed:
+                    pestana.puedeAdelante ? () => pestana.web?.goForward() : null,
+                icon: const Icon(Icons.arrow_forward_ios_rounded, size: 19),
+                color: Tono.texto2,
+                disabledColor: Tono.texto3.withValues(alpha: 0.4),
+              ),
+              IconButton(
+                onPressed: _irAlInicio,
+                icon: const Icon(Icons.home_rounded, size: 21),
+                color: Tono.texto2,
+              ),
+              IconButton(
+                onPressed: hayMedios ? _verMediosDetectados : null,
+                icon: Badge(
+                  isLabelVisible: hayMedios,
+                  label: Text('${pestana.medios.length}'),
+                  backgroundColor: Tono.acento,
+                  textColor: const Color(0xFF04202A),
+                  child: const Icon(Icons.playlist_add_rounded, size: 21),
+                ),
+                color: Tono.texto2,
+                disabledColor: Tono.texto3.withValues(alpha: 0.4),
+                tooltip: 'Medios sueltos de la página',
+              ),
+              IconButton(
+                onPressed: pestana.url.isEmpty ? null : _abrirOpciones,
+                icon: const Icon(Icons.download_rounded, size: 22),
+                color: Tono.acento,
+                disabledColor: Tono.texto3.withValues(alpha: 0.4),
+                tooltip: 'Descargar esta página',
+              ),
+            ],
+          ),
+        );
+      },
+    );
+  }
+
+  void _irAlInicio() {
+    final pestana = _pestana;
+    pestana.olvidarMedios();
+    pestana.ficha = null;
+    pestana.urlDeLaFicha = '';
+    pestana.urlInicial = '';
+    pestana.cambiar(url: '', titulo: '', cargando: false, progreso: 0);
+    pestana.web = null;
+    _direccion.clear();
+    setState(() {});
+  }
+
+  void _abrirListaDePestanas() {
+    showModalBottomSheet<void>(
+      context: context,
+      backgroundColor: Tono.superficie,
+      builder: (_) => StatefulBuilder(
+        builder: (contextoHoja, refrescar) => SafeArea(
+          child: Column(
+            mainAxisSize: MainAxisSize.min,
+            crossAxisAlignment: CrossAxisAlignment.start,
+            children: [
+              Padding(
+                padding: const EdgeInsets.fromLTRB(Medidas.margen, 6, 8, 4),
+                child: Row(
+                  children: [
+                    Expanded(
+                      child: Text('Pestañas',
+                          style: Theme.of(context).textTheme.titleMedium),
+                    ),
+                    TextButton.icon(
+                      onPressed: _navegador.pestanas.length >= _topeDePestanas
+                          ? null
+                          : () {
+                              _navegador.abrir();
+                              Navigator.of(contextoHoja).pop();
+                            },
+                      icon: const Icon(Icons.add_rounded, size: 18),
+                      label: const Text('Nueva'),
+                    ),
+                  ],
+                ),
+              ),
+              Flexible(
+                child: ListView(
+                  shrinkWrap: true,
+                  children: [
+                    for (var i = 0; i < _navegador.pestanas.length; i++)
+                      _FilaPestana(
+                        pestana: _navegador.pestanas[i],
+                        activa: i == _navegador.indice,
+                        alAbrir: () {
+                          _navegador.irA(i);
+                          Navigator.of(contextoHoja).pop();
+                        },
+                        alCerrar: () {
+                          _navegador.cerrar(_navegador.pestanas[i]);
+                          refrescar(() {});
+                        },
+                      ),
+                  ],
+                ),
+              ),
+              const SizedBox(height: 8),
+            ],
+          ),
+        ),
+      ),
+    );
+  }
+
   void _verMediosDetectados() {
+    final pestana = _pestana;
     showModalBottomSheet<void>(
       context: context,
       backgroundColor: Tono.superficie,
@@ -577,7 +706,7 @@ class _VistaNavegadorState extends State<VistaNavegador> with AutomaticKeepAlive
               child: ListView(
                 shrinkWrap: true,
                 children: [
-                  for (final medio in _mediosDetectados)
+                  for (final medio in candidatasOrdenadas(pestana.medios))
                     ListTile(
                       leading: Icon(
                         medio.esSoloAudio
@@ -617,6 +746,7 @@ class _VistaNavegadorState extends State<VistaNavegador> with AutomaticKeepAlive
 
   Future<void> _descargarMedioDirecto(String url) async {
     final servicios = Servicios.de(context);
+    final pestana = _pestana;
     final eleccion = await mostrarHojaDescarga(
       context,
       url: url,
@@ -629,14 +759,16 @@ class _VistaNavegadorState extends State<VistaNavegador> with AutomaticKeepAlive
     encolarYAvisar(
       context,
       gestor: servicios.descargas,
-      url: _urlActual.isEmpty ? url : _urlActual,
+      url: pestana.url.isEmpty ? url : pestana.url,
       // aqui la direccion ya es la del archivo: se pasa como tal
       urlMedia: url,
       cookies: galletas,
       tipo: eleccion.tipo,
       calidad: eleccion.calidad,
       formatoAudio: eleccion.formatoAudio,
-      titulo: eleccion.ficha.titulo.isNotEmpty ? eleccion.ficha.titulo : _titulo,
+      titulo: eleccion.ficha.titulo.isNotEmpty
+          ? eleccion.ficha.titulo
+          : pestana.titulo,
       miniatura: eleccion.ficha.miniatura,
     );
   }
@@ -668,11 +800,255 @@ class _VistaNavegadorState extends State<VistaNavegador> with AutomaticKeepAlive
         const SizedBox(height: 24),
         const Aviso(
           texto: 'Cualquier web sirve, no solo estas. Cuando estés viendo algo '
-              'descargable, la app lo detecta sola.',
+              'descargable, la app lo detecta sola. Y si la propia página te '
+              'ofrece un archivo, también se guarda.',
           icono: Icons.lightbulb_outline_rounded,
           color: Tono.acento,
         ),
       ],
+    );
+  }
+}
+
+/// El navegador de una pestana.
+///
+/// Aqui se ata todo lo que el visor de siempre no dejaba hacer: el guion que
+/// entra antes que el de la pagina, el interceptor que ve pasar cada peticion,
+/// las descargas que dispara el sitio y las ventanas que pide abrir.
+class _VistaWeb extends StatefulWidget {
+  const _VistaWeb({
+    super.key,
+    required this.pestana,
+    required this.navegador,
+    required this.alCambiarUrl,
+    required this.alGuardarArchivo,
+    required this.alPedirVentana,
+  });
+
+  final Pestana pestana;
+  final NavegadorCaudal navegador;
+  final void Function(String url) alCambiarUrl;
+  final void Function(String mensaje) alGuardarArchivo;
+  final bool Function(String url, int windowId) alPedirVentana;
+
+  @override
+  State<_VistaWeb> createState() => _VistaWebState();
+}
+
+class _VistaWebState extends State<_VistaWeb> {
+  Pestana get _p => widget.pestana;
+
+  @override
+  Widget build(BuildContext context) {
+    return InAppWebView(
+      windowId: _p.windowId,
+      initialUrlRequest: _p.windowId != null || _p.urlInicial.isEmpty
+          ? null
+          : URLRequest(url: WebUri(_p.urlInicial)),
+      initialSettings: ajustesNavegador(),
+      initialUserScripts: guionesDeArranque(),
+      onWebViewCreated: (controlador) {
+        _p.web = controlador;
+        controlador.addJavaScriptHandler(
+          handlerName: 'caudalMedios',
+          callback: (argumentos) {
+            if (argumentos.isNotEmpty) _medioEncontrado('${argumentos.first}');
+            return null;
+          },
+        );
+        controlador.addJavaScriptHandler(
+          handlerName: 'caudalRuta',
+          callback: (argumentos) {
+            if (argumentos.isNotEmpty) widget.alCambiarUrl('${argumentos.first}');
+            return null;
+          },
+        );
+        controlador.addJavaScriptHandler(
+          handlerName: 'caudalArchivo',
+          callback: (argumentos) {
+            if (argumentos.isNotEmpty) widget.alGuardarArchivo('${argumentos.first}');
+            return null;
+          },
+        );
+      },
+
+      // --- lo que ve pasar el navegador
+      //
+      // Por aqui pasa todo lo que pide la pagina, incluido lo que piden sus
+      // workers. Es la red que el guion de JavaScript no puede tender.
+      shouldInterceptRequest: (controlador, peticion) async {
+        final url = peticion.url.toString();
+        if (podriaSerMedia(url)) _p.anotar(url, 'red');
+        return null;      // que la peticion siga su curso normal
+      },
+      onLoadResource: (controlador, recurso) async {
+        final url = recurso.url.toString();
+        if (podriaSerMedia(url)) _p.anotar(url, 'recurso');
+      },
+
+      // --- lo que la propia web manda descargar
+      onDownloadStartRequest: (controlador, peticion) async {
+        widget.navegador.pedirDescarga(PeticionDescarga(
+          url: peticion.url.toString(),
+          nombre: peticion.suggestedFilename ?? '',
+          tipoMime: peticion.mimeType ?? '',
+          tamano: peticion.contentLength,
+          referente: _p.url,
+        ));
+      },
+
+      // --- las ventanas que pide abrir la pagina
+      onCreateWindow: (controlador, accion) async {
+        final destino = accion.request.url?.toString() ?? '';
+        return widget.alPedirVentana(destino, accion.windowId);
+      },
+      onCloseWindow: (controlador) async {
+        if (_p.windowId != null) widget.navegador.cerrar(_p);
+      },
+
+      // --- estado de la pagina
+      onLoadStart: (controlador, url) {
+        _p.olvidarMedios();
+        _p.cambiar(cargando: true);
+        widget.alCambiarUrl(url?.toString() ?? '');
+      },
+      onLoadStop: (controlador, url) async {
+        _p.cambiar(cargando: false);
+        widget.alCambiarUrl(url?.toString() ?? '');
+        final titulo = await controlador.getTitle();
+        _p.cambiar(titulo: titulo ?? '');
+        await _p.refrescarBotones();
+      },
+      onProgressChanged: (controlador, progreso) {
+        _p.cambiar(progreso: progreso, cargando: progreso < 100);
+      },
+      onTitleChanged: (controlador, titulo) {
+        _p.cambiar(titulo: titulo ?? '');
+      },
+      onUpdateVisitedHistory: (controlador, url, esRecarga) async {
+        widget.alCambiarUrl(url?.toString() ?? '');
+        await _p.refrescarBotones();
+      },
+      onReceivedError: (controlador, peticion, error) {
+        if (peticion.isForMainFrame ?? false) _p.cambiar(cargando: false);
+      },
+
+      // --- enlaces que no son paginas
+      shouldOverrideUrlLoading: (controlador, accion) async {
+        final destino = accion.request.url;
+        if (destino == null) return NavigationActionPolicy.ALLOW;
+        final esquema = destino.scheme.toLowerCase();
+        if (esquema == 'http' || esquema == 'https' || esquema == 'about') {
+          return NavigationActionPolicy.ALLOW;
+        }
+        // intent://, market://, whatsapp://... no son paginas: si se dejan
+        // pasar, el navegador se queda en una pantalla de error
+        return NavigationActionPolicy.CANCEL;
+      },
+
+      // --- permisos que pide el sitio
+      onPermissionRequest: (controlador, peticion) async {
+        // el permiso de contenido protegido hace falta para que se vea el
+        // video en muchos sitios, y no dice nada del usuario
+        final soloDrm = peticion.resources.every(
+            (r) => r.toString().toLowerCase().contains('protected'));
+        return PermissionResponse(
+          resources: peticion.resources,
+          action: soloDrm
+              ? PermissionResponseAction.GRANT
+              : PermissionResponseAction.DENY,
+        );
+      },
+    );
+  }
+
+  void _medioEncontrado(String mensaje) {
+    try {
+      final datos = jsonDecode(mensaje);
+      if (datos is Map) {
+        _p.anotar('${datos['url'] ?? ''}', '${datos['origen'] ?? ''}');
+      } else if (datos is List) {
+        for (final x in datos) {
+          _p.anotar('$x', 'dom');
+        }
+      }
+    } catch (_) {
+      // si la pagina devuelve algo raro, seguimos sin medios detectados
+    }
+  }
+}
+
+class _BotonPestanas extends StatelessWidget {
+  const _BotonPestanas({required this.cuantas, required this.alPulsar});
+
+  final int cuantas;
+  final VoidCallback alPulsar;
+
+  @override
+  Widget build(BuildContext context) {
+    return InkWell(
+      borderRadius: BorderRadius.circular(9),
+      onTap: alPulsar,
+      child: Container(
+        width: 34,
+        height: 34,
+        alignment: Alignment.center,
+        decoration: BoxDecoration(
+          border: Border.all(color: Tono.texto3, width: 1.6),
+          borderRadius: BorderRadius.circular(9),
+        ),
+        child: Text(
+          '$cuantas',
+          style: const TextStyle(
+              fontSize: 12.5, fontWeight: FontWeight.w700, color: Tono.texto2),
+        ),
+      ),
+    );
+  }
+}
+
+class _FilaPestana extends StatelessWidget {
+  const _FilaPestana({
+    required this.pestana,
+    required this.activa,
+    required this.alAbrir,
+    required this.alCerrar,
+  });
+
+  final Pestana pestana;
+  final bool activa;
+  final VoidCallback alAbrir;
+  final VoidCallback alCerrar;
+
+  @override
+  Widget build(BuildContext context) {
+    return ListTile(
+      leading: Icon(
+        activa ? Icons.web_asset_rounded : Icons.web_asset_outlined,
+        color: activa ? Tono.acento : Tono.texto3,
+        size: 20,
+      ),
+      title: Text(
+        pestana.nombreCorto,
+        maxLines: 1,
+        overflow: TextOverflow.ellipsis,
+        style: TextStyle(
+          fontSize: 14,
+          fontWeight: activa ? FontWeight.w600 : FontWeight.w400,
+        ),
+      ),
+      subtitle: pestana.url.isEmpty
+          ? null
+          : Text(pestana.url,
+              maxLines: 1,
+              overflow: TextOverflow.ellipsis,
+              style: Theme.of(context).textTheme.bodySmall),
+      trailing: IconButton(
+        icon: const Icon(Icons.close_rounded, size: 18),
+        color: Tono.texto3,
+        onPressed: alCerrar,
+      ),
+      onTap: alAbrir,
     );
   }
 }

@@ -1,7 +1,7 @@
 name: caudal
 description: "Descarga musica y videos desde su propio navegador"
 publish_to: 'none'
-version: 1.7.0+13
+version: 1.8.0+14
 
 environment:
   sdk: ^3.13.0
@@ -13,10 +13,10 @@ dependencies:
   # red y descargas
   dio: ^5.7.0
 
-  # navegador integrado
-  webview_flutter: ^4.10.0
-  webview_flutter_android: ^4.3.0
-  webview_flutter_wkwebview: ^3.18.0
+  # navegador propio: hace falta uno que deje ver pasar cada peticion de la
+  # pagina, leer sus cookies de sesion y atender las descargas que dispare.
+  # El webview_flutter de siempre no ofrece nada de eso.
+  flutter_inappwebview: ^6.1.5
 
   # almacenamiento y permisos
   path_provider: ^2.1.5

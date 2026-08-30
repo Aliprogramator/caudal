@@ -429,6 +429,59 @@ class MotorLocal {
     return destino;
   }
 
+  /// Trae un archivo tal cual y lo deja guardado con su nombre.
+  ///
+  /// Aqui no se busca nada ni se convierte nada: es lo que hace falta cuando
+  /// la propia web dispara la descarga y ya nos ha dicho que archivo quiere.
+  Future<String> descargarArchivo({
+    required String url,
+    required String nombre,
+    required Directory carpeta,
+    required void Function(double, String) alProgresar,
+    required bool Function() cancelado,
+    String referente = '',
+    String cookies = '',
+  }) async {
+    final punto = nombre.lastIndexOf('.');
+    final extension = punto > 0 && punto < nombre.length - 1
+        ? nombre.substring(punto + 1)
+        : _extensionDe(url);
+    final base = nombreSeguro(punto > 0 ? nombre.substring(0, punto) : nombre);
+
+    final temporal = File(p.join(
+      carpeta.path,
+      '.caudal_${DateTime.now().millisecondsSinceEpoch}.$extension',
+    ));
+
+    await _bajarUrl(url, temporal, alProgresar, cancelado,
+        desde: 0, hasta: 99, referente: referente, cookies: cookies);
+
+    final destino = _libre(carpeta, base, extension);
+    await temporal.rename(destino);
+    alProgresar(100, 'Listo');
+    return destino;
+  }
+
+  /// Guarda un archivo que ya venia dentro de la propia pagina.
+  ///
+  /// Hay webs que arman el archivo en el navegador y lo ofrecen como `blob:`.
+  /// Ahi no hay ninguna direccion que pedir: el contenido ya esta, y lo unico
+  /// que queda es escribirlo.
+  Future<String> guardarBytes({
+    required List<int> datos,
+    required String nombre,
+    required Directory carpeta,
+  }) async {
+    final punto = nombre.lastIndexOf('.');
+    final extension = punto > 0 && punto < nombre.length - 1
+        ? nombre.substring(punto + 1)
+        : 'bin';
+    final base = nombreSeguro(punto > 0 ? nombre.substring(0, punto) : nombre);
+    final destino = _libre(carpeta, base, extension);
+    await File(destino).writeAsBytes(datos, flush: true);
+    return destino;
+  }
+
   /// Saca la pista de sonido de un archivo, probando varias formas.
   ///
   /// Que falle la primera no quiere decir que no se pueda: cada video trae su

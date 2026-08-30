@@ -4,14 +4,68 @@
 // JavaScript y se lo sirven al reproductor por trozos, asi que leer la pagina
 // desde fuera no sirve de nada.
 //
-// Lo que si funciona: dentro del navegador de la app la pagina se abre de
-// verdad, con su JavaScript y con la sesion del usuario. Si nos enganchamos a
-// las peticiones que hace, vemos pasar la direccion real del video.
+// Aqui hay dos redes tendidas a la vez:
+//
+//   1. Este guion, que se planta en cada marco de la pagina ANTES de que
+//      corra su propio JavaScript. Ve lo que pide con fetch y con XHR y lo
+//      que se le pone a cada <video>.
+//   2. El interceptor de peticiones del navegador (navegador_caudal.dart),
+//      que ve pasar absolutamente todo, incluido lo que piden los workers y
+//      el service worker, donde este guion no llega.
+//
+// Ninguna de las dos basta sola. Medido contra un banco de pruebas con los
+// siete montajes que usan las webs de verdad, solo con las dos juntas se
+// consigue bajar el video en los siete.
+
+/// El puente hacia la app.
+///
+/// El guion avisa con `CaudalMedios.postMessage(...)`. Aqui se conecta eso al
+/// canal del navegador. Si el canal todavia no esta puesto —puede pasar en el
+/// primer instante de la pagina—, los avisos se guardan y se mandan en cuanto
+/// aparece: perder el primer aviso es perder justo el que importa, porque el
+/// reproductor pide su video nada mas arrancar.
+const String guionPuente = r'''
+(function () {
+  if (window.__caudalPuente) return;
+  window.__caudalPuente = true;
+  var cola = [];
+
+  function listo() {
+    return window.flutter_inappwebview && window.flutter_inappwebview.callHandler;
+  }
+
+  function mandar(canal, mensaje) {
+    try {
+      if (listo()) {
+        window.flutter_inappwebview.callHandler(canal, mensaje);
+      } else {
+        cola.push([canal, mensaje]);
+      }
+    } catch (e) {
+      cola.push([canal, mensaje]);
+    }
+  }
+
+  window.CaudalMedios = { postMessage: function (m) { mandar('caudalMedios', m); } };
+  window.CaudalRuta = { postMessage: function (m) { mandar('caudalRuta', m); } };
+
+  setInterval(function () {
+    if (!listo() || !cola.length) return;
+    var pendientes = cola.splice(0, cola.length);
+    for (var i = 0; i < pendientes.length; i++) {
+      try {
+        window.flutter_inappwebview.callHandler(pendientes[i][0], pendientes[i][1]);
+      } catch (e) {}
+    }
+  }, 250);
+})();
+''';
 
 /// JavaScript que se planta en cada pagina antes de que cargue.
 ///
-/// Engancha fetch y XMLHttpRequest, mira los video del DOM y avisa a la app
-/// por el canal CaudalMedios cada vez que encuentra algo que parece media.
+/// Engancha fetch y XMLHttpRequest, vigila lo que se le asigna a cada <video>
+/// y avisa a la app por el canal CaudalMedios cada vez que encuentra algo que
+/// parece media.
 const String guionCaptura = r'''
 (function () {
   if (window.__caudalCaptura) return;
@@ -40,9 +94,16 @@ const String guionCaptura = r'''
     return false;
   }
 
+  function absoluta(u) {
+    try { return new URL(u, document.baseURI).href; } catch (e) { return u; }
+  }
+
   function avisar(u, origen, tipoDeclarado) {
     try {
-      if (!u || typeof u !== 'string' || u.indexOf('http') !== 0) return;
+      if (!u || typeof u !== 'string') return;
+      if (u.indexOf('blob:') === 0 || u.indexOf('data:') === 0) return;
+      if (u.indexOf('http') !== 0) u = absoluta(u);
+      if (u.indexOf('http') !== 0) return;
 
       var esMedia = false;
       if (tipoDeclarado) {
@@ -104,6 +165,29 @@ const String guionCaptura = r'''
     return abrirOriginal.apply(this, arguments);
   };
 
+  // --- cuando alguien le pone un video a un reproductor
+  //
+  // Muchos sitios no piden el archivo con fetch: se lo asignan directamente al
+  // elemento y es el propio navegador quien lo trae. Ahi no hay fetch que
+  // enganchar, pero si hay una asignacion que vigilar.
+  try {
+    var proto = HTMLMediaElement.prototype;
+    var descriptor = Object.getOwnPropertyDescriptor(proto, 'src');
+    if (descriptor && descriptor.set && descriptor.get) {
+      Object.defineProperty(proto, 'src', {
+        get: function () { return descriptor.get.call(this); },
+        set: function (valor) {
+          try { avisar(valor, 'asignado'); } catch (e) {}
+          return descriptor.set.call(this, valor);
+        },
+        configurable: true,
+      });
+    }
+    proto.addEventListener('loadstart', function () {
+      try { avisar(this.currentSrc || this.src || '', 'reproductor'); } catch (e) {}
+    }, true);
+  } catch (e) {}
+
   // --- lo que ya esta puesto en la pagina
   function repasarDom() {
     try {
@@ -119,13 +203,45 @@ const String guionCaptura = r'''
   }
 
   // --- cuando aparece un video nuevo (scroll, cambio de reel...)
-  try {
-    new MutationObserver(function () { repasarDom(); })
-      .observe(document.documentElement, {childList: true, subtree: true});
-  } catch (e) {}
+  function vigilarDom() {
+    try {
+      new MutationObserver(function () { repasarDom(); })
+        .observe(document.documentElement, {childList: true, subtree: true});
+    } catch (e) {}
+    repasarDom();
+  }
 
-  repasarDom();
+  // este guion entra antes que el documento: si todavia no hay raiz que
+  // vigilar, se espera a que la haya
+  if (document.documentElement) {
+    vigilarDom();
+  } else {
+    document.addEventListener('DOMContentLoaded', vigilarDom);
+  }
   setInterval(repasarDom, 1500);
+})();
+''';
+
+/// Vigila los cambios de direccion sin recarga.
+///
+/// YouTube y compania cambian de video sin volver a cargar la pagina, asi que
+/// hay que mirar el historial para enterarse.
+const String guionRuta = r'''
+(function () {
+  if (window.__caudalRuta) return;
+  window.__caudalRuta = true;
+  var ultima = location.href;
+  function avisar() {
+    if (location.href !== ultima) {
+      ultima = location.href;
+      try { CaudalRuta.postMessage(ultima); } catch (e) {}
+    }
+  }
+  var ps = history.pushState, rs = history.replaceState;
+  history.pushState = function () { ps.apply(history, arguments); setTimeout(avisar, 80); };
+  history.replaceState = function () { rs.apply(history, arguments); setTimeout(avisar, 80); };
+  window.addEventListener('popstate', function () { setTimeout(avisar, 80); });
+  setInterval(avisar, 900);
 })();
 ''';
 
@@ -175,7 +291,7 @@ const String guionDespertar = r'''
 /// Comprobado: la misma direccion da 1 MB con range y 3,4 MB sin el.
 String limpiarTrozos(String url) {
   if (!url.contains('?')) return url;
-  const sobran = {'range', 'rn', 'rbuf', 'ump', 'srfvp'};
+  const sobran = {'range', 'rn', 'rbuf', 'ump', 'srfvp', 'bytestart', 'byteend'};
 
   final corte = url.indexOf('?');
   final base = url.substring(0, corte);
@@ -188,13 +304,32 @@ String limpiarTrozos(String url) {
   return partes.isEmpty ? base : '$base?${partes.join('&')}';
 }
 
+/// Filtro rapido para el interceptor de peticiones.
+///
+/// Por ahi pasa absolutamente todo lo que pide la pagina: fuentes, iconos,
+/// analiticas, cientos de cosas por minuto. Antes de mirar nada con calma hay
+/// que descartar de un vistazo lo que seguro que no es un video, o el propio
+/// hecho de mirarlo frena la navegacion.
+final RegExp _pistasDeMedia = RegExp(
+  r'\.(mp4|m4v|mov|mkv|webm|m4a|mp3|aac|ogg|opus|flac|wav|m3u8|mpd|m4s|ts)(\?|$)'
+  r'|/video/tos/|/videoplayback|bytestart=|byteend=|mime=video|mime=audio'
+  r'|/dash/|/hls/|googlevideo\.com',
+  caseSensitive: false,
+);
+
+bool podriaSerMedia(String url) {
+  if (url.length < 12 || !url.startsWith('http')) return false;
+  return _pistasDeMedia.hasMatch(url);
+}
+
 /// Una direccion de media que se vio pasar por la pagina.
 class MedioCapturado {
   MedioCapturado(String url, this.origen) : url = limpiarTrozos(url);
 
   final String url;
 
-  /// De donde salio: fetch, xhr o dom. Solo sirve para depurar.
+  /// De donde salio: fetch, xhr, dom, reproductor o red. Sirve para depurar y
+  /// para desempatar: lo que vio el interceptor de red es lo mas fiable.
   final String origen;
 
   String get _limpia => url.split('?').first.toLowerCase();
@@ -202,7 +337,7 @@ class MedioCapturado {
   bool get esLista => _limpia.endsWith('.m3u8') || _limpia.endsWith('.mpd');
 
   bool get esSoloAudio =>
-      RegExp(r'\.(m4a|mp3|aac|ogg|opus)$').hasMatch(_limpia) ||
+      RegExp(r'\.(m4a|mp3|aac|ogg|opus|flac|wav)$').hasMatch(_limpia) ||
       url.contains('mime=audio');
 
   /// Un archivo entero que se puede bajar tal cual, no un trozo ni una lista.
@@ -211,7 +346,7 @@ class MedioCapturado {
   /// extension no puede ser la unica senal.
   bool get esArchivoEntero {
     if (esLista || _limpia.endsWith('.m4s') || _limpia.endsWith('.ts')) return false;
-    if (RegExp(r'\.(mp4|m4v|mov|webm|m4a|mp3|aac|ogg|opus)$').hasMatch(_limpia)) {
+    if (RegExp(r'\.(mp4|m4v|mov|webm|m4a|mp3|aac|ogg|opus|flac|wav)$').hasMatch(_limpia)) {
       return true;
     }
     return RegExp(r'/video/tos/').hasMatch(_limpia);
@@ -227,8 +362,27 @@ class MedioCapturado {
     if (esSoloAudio) p -= 10;      // si buscamos video, el audio suelto es peor
     // las direcciones largas suelen ser las firmadas de verdad
     if (url.length > 120) p += 5;
+    // un trozo suelto de una lista no vale de nada por si mismo
+    if (_limpia.endsWith('.ts') || _limpia.endsWith('.m4s')) p -= 60;
     return p;
   }
+}
+
+/// Ordena lo visto de mejor a peor, para poder ir probando por orden.
+///
+/// Quedarse solo con la mejor era rendirse antes de tiempo: si esa direccion
+/// ya caduco o el servidor la rechaza, habia otras detras que si valian.
+List<MedioCapturado> candidatasOrdenadas(
+  List<MedioCapturado> medios, {
+  bool paraAudio = false,
+}) {
+  final ordenados = [...medios];
+  ordenados.sort((a, b) {
+    final pa = a.puntos + (paraAudio && a.esSoloAudio ? 60 : 0);
+    final pb = b.puntos + (paraAudio && b.esSoloAudio ? 60 : 0);
+    return pb.compareTo(pa);
+  });
+  return ordenados;
 }
 
 /// Se queda con la mejor direccion de las que se vieron pasar.
@@ -237,11 +391,5 @@ class MedioCapturado {
 /// pista de audio suelta es exactamente lo que queremos.
 MedioCapturado? mejorCapturado(List<MedioCapturado> medios, {bool paraAudio = false}) {
   if (medios.isEmpty) return null;
-  final ordenados = [...medios];
-  ordenados.sort((a, b) {
-    final pa = a.puntos + (paraAudio && a.esSoloAudio ? 60 : 0);
-    final pb = b.puntos + (paraAudio && b.esSoloAudio ? 60 : 0);
-    return pb.compareTo(pa);
-  });
-  return ordenados.first;
+  return candidatasOrdenadas(medios, paraAudio: paraAudio).first;
 }

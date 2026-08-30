@@ -4,68 +4,98 @@
 // pero eso solo sirve si el usuario paso por ahi. Si pega un enlace en la
 // pantalla de descargas, o lo comparte desde otra app, no hay nada capturado.
 //
-// Aqui se abre la pagina en un navegador que no se ve, del tamano de un pixel,
-// se le da al play y se espera a ver pasar la direccion del video. Es lo mismo
-// que hace el navegador de la app, pero sin molestar a nadie.
+// Aqui se abre la pagina en un navegador sin pantalla, se le da al play y se
+// espera a ver pasar la direccion del video. Es lo mismo que hace el navegador
+// de la app, con el mismo acceso, pero sin molestar a nadie.
+//
+// Antes esto era un WebView de un pixel escondido en una esquina de la app,
+// porque el visor de siempre no ejecuta JavaScript si no esta en pantalla.
+// El navegador nuevo si trae uno pensado para trabajar sin que se vea, asi que
+// aquel apano ya no hace falta.
 
 import 'dart:async';
 import 'dart:convert';
+import 'dart:ui' show Size;
 
-import 'package:flutter/material.dart';
-import 'package:webview_flutter/webview_flutter.dart';
+import 'package:flutter_inappwebview/flutter_inappwebview.dart';
 
 import 'captura.dart';
+import 'navegador_caudal.dart';
 
 /// Lo que se saco de abrir la pagina a escondidas.
 class CapturaOculta {
-  const CapturaOculta({this.url = '', this.titulo = '', this.cookies = ''});
+  const CapturaOculta({
+    this.url = '',
+    this.titulo = '',
+    this.cookies = '',
+    this.candidatas = const [],
+  });
 
   final String url;
   final String titulo;
   final String cookies;
+
+  /// Las demas direcciones vistas, por si la primera no sirve.
+  final List<String> candidatas;
 
   bool get vale => url.isNotEmpty;
 }
 
 /// Abre paginas sin ensenarlas y devuelve el video que encuentra.
 ///
-/// Solo trabaja de uno en uno: abrir varias paginas a la vez en un navegador
-/// oculto gasta memoria y no acelera nada.
-class CapturadorOculto extends ChangeNotifier {
-  WebViewController? _web;
+/// Solo trabaja de una en una: abrir varias paginas a la vez gasta memoria y
+/// no acelera nada.
+class CapturadorOculto {
+  HeadlessInAppWebView? _navegador;
   Completer<CapturaOculta>? _enCurso;
   final List<MedioCapturado> _vistos = [];
+  final Set<String> _yaVistas = <String>{};
   Timer? _insistir;
   bool _paraAudio = false;
-  bool _montado = false;
-
-  /// El navegador oculto tiene que estar en pantalla para funcionar, aunque
-  /// sea de un pixel: si no, Android no ejecuta su JavaScript.
-  WebViewController? get controlador => _web;
+  String _urlActual = '';
 
   bool get trabajando => _enCurso != null && !_enCurso!.isCompleted;
 
-  /// Deja el navegador listo nada más arrancar la app.
+  /// Deja el navegador oculto en marcha.
   ///
-  /// Crearlo en el momento de usarlo no sirve: el widget tarda un instante en
-  /// aparecer en pantalla y, hasta que aparece, Android no ejecuta nada de lo
-  /// que le mandemos. Se queda esperando en cero y nunca ve pasar el video.
-  void preparar() {
-    if (_web != null) return;
-    _web = WebViewController()
-      ..setJavaScriptMode(JavaScriptMode.unrestricted)
-      ..setUserAgent(
-        'Mozilla/5.0 (Linux; Android 13) AppleWebKit/537.36 (KHTML, like Gecko) '
-        'Chrome/124.0.0.0 Mobile Safari/537.36',
-      )
-      ..addJavaScriptChannel('CaudalMedios', onMessageReceived: _llego);
-    notifyListeners();
-  }
-
-  /// Lo llama el widget cuando ya está de verdad en pantalla.
-  void marcarMontado() {
-    if (_montado) return;
-    _montado = true;
+  /// Se llama al arrancar la app: montarlo cuesta un instante y es preferible
+  /// pagarlo antes que en mitad de una descarga.
+  Future<void> preparar() async {
+    if (_navegador != null) return;
+    _navegador = HeadlessInAppWebView(
+      initialSize: const Size(412, 915),
+      initialSettings: ajustesNavegador(),
+      initialUserScripts: guionesDeArranque(),
+      initialUrlRequest: URLRequest(url: WebUri('about:blank')),
+      onWebViewCreated: (controlador) {
+        controlador.addJavaScriptHandler(
+          handlerName: 'caudalMedios',
+          callback: (argumentos) {
+            if (argumentos.isNotEmpty) _llego('${argumentos.first}');
+            return null;
+          },
+        );
+        controlador.addJavaScriptHandler(
+          handlerName: 'caudalRuta',
+          callback: (argumentos) => null,
+        );
+      },
+      // aqui esta la diferencia con el navegador de antes: se ve pasar cada
+      // peticion, tambien las que la pagina hace desde un worker
+      shouldInterceptRequest: (controlador, peticion) async {
+        _anotar(peticion.url.toString(), 'red');
+        return null;
+      },
+      onLoadResource: (controlador, recurso) async {
+        _anotar(recurso.url.toString(), 'recurso');
+      },
+      onLoadStop: (controlador, url) async {
+        // en cuanto la pagina esta, se le da al play para que pida el video
+        await controlador.evaluateJavascript(source: guionDespertar);
+        _insistirUnRato(controlador);
+      },
+    );
+    await _navegador!.run();
   }
 
   /// Abre [url] a escondidas y espera a ver pasar un video.
@@ -82,29 +112,25 @@ class CapturadorOculto extends ChangeNotifier {
     }
 
     _vistos.clear();
+    _yaVistas.clear();
     _paraAudio = paraAudio;
+    _urlActual = url;
     final fin = Completer<CapturaOculta>();
     _enCurso = fin;
 
-    preparar();
-
-    // esperar a que el widget esté de verdad en pantalla: si cargamos antes,
-    // el JavaScript no llega a ejecutarse y no vemos pasar nada
-    for (var i = 0; i < 40 && !_montado; i++) {
-      await Future<void>.delayed(const Duration(milliseconds: 100));
+    await preparar();
+    final controlador = _navegador?.webViewController;
+    if (controlador == null) {
+      _enCurso = null;
+      return const CapturaOculta();
     }
 
-    _web!.setNavigationDelegate(NavigationDelegate(
-      onPageStarted: (_) => _web!.runJavaScript(guionCaptura),
-      onPageFinished: (_) {
-        _web!.runJavaScript(guionCaptura);
-        // en cuanto la pagina esta, se le da al play para que pida el video
-        _web!.runJavaScript(guionDespertar);
-        _insistirUnRato();
-      },
-    ));
+    // lo que pide el service worker no lleva escrito de que navegador viene:
+    // hay que apuntarse a la lista mientras dure esta captura
+    void delWorker(String u) => _anotar(u, 'sw');
+    NavegadorCaudal.escucharAlWorker(delWorker);
 
-    await _web!.loadRequest(Uri.parse(url));
+    await controlador.loadUrl(urlRequest: URLRequest(url: WebUri(url)));
 
     // se corta pase lo que pase: nadie espera indefinidamente
     Timer(espera, () async {
@@ -113,48 +139,61 @@ class CapturadorOculto extends ChangeNotifier {
 
     final resultado = await fin.future;
     _insistir?.cancel();
+    NavegadorCaudal.dejarDeEscucharAlWorker(delWorker);
     _enCurso = null;
     // dejamos la pagina en blanco para que no siga gastando
     try {
-      await _web?.loadRequest(Uri.parse('about:blank'));
+      await controlador.loadUrl(
+          urlRequest: URLRequest(url: WebUri('about:blank')));
     } catch (_) {
       // si no se puede, tampoco pasa nada
     }
     return resultado;
   }
 
-  /// Vuelve a plantar el guion unas cuantas veces, como en el navegador.
-  void _insistirUnRato() {
+  /// Vuelve a darle al play unas cuantas veces.
+  ///
+  /// El guion de captura ya va plantado desde el primer instante, pero el
+  /// video de algunos sitios no se pide hasta que algo lo reproduce, y a veces
+  /// el primer empujon llega antes de que el reproductor exista.
+  void _insistirUnRato(InAppWebViewController controlador) {
     _insistir?.cancel();
     var veces = 0;
-    _insistir = Timer.periodic(const Duration(milliseconds: 900), (t) {
-      if (++veces > 12 || !trabajando) {
+    _insistir = Timer.periodic(const Duration(milliseconds: 1200), (t) {
+      if (++veces > 10 || !trabajando) {
         t.cancel();
         return;
       }
-      _web?.runJavaScript(guionCaptura);
-      if (veces == 3 || veces == 7) _web?.runJavaScript(guionDespertar);
+      controlador.evaluateJavascript(source: guionDespertar);
     });
   }
 
-  void _llego(JavaScriptMessage mensaje) {
+  void _llego(String mensaje) {
     try {
-      final datos = jsonDecode(mensaje.message);
+      final datos = jsonDecode(mensaje);
       if (datos is! Map) return;
-      final u = (datos['url'] ?? '').toString();
-      if (!u.startsWith('http')) return;
-      if (_vistos.any((m) => m.url == u)) return;
-
-      _vistos.add(MedioCapturado(u, (datos['origen'] ?? '').toString()));
-
-      // un archivo entero es lo que buscamos: en cuanto aparece, terminamos
-      final mejor = mejorCapturado(_vistos, paraAudio: _paraAudio);
-      if (mejor != null && mejor.esArchivoEntero) {
-        _terminarCon(mejor);
-      }
+      _anotar('${datos['url'] ?? ''}', '${datos['origen'] ?? ''}');
     } catch (_) {
       // mensajes raros de la pagina: se ignoran
     }
+  }
+
+  void _anotar(String url, String origen) {
+    if (!trabajando) return;
+    if (url.isEmpty || !url.startsWith('http')) return;
+    // por el interceptor pasa todo lo que carga la pagina: lo que ni de lejos
+    // es un video se descarta antes de mirarlo con calma
+    if (origen != 'dom' && origen != 'fetch' && origen != 'xhr' &&
+        !podriaSerMedia(url)) {
+      return;
+    }
+    final medio = MedioCapturado(url, origen);
+    if (!_yaVistas.add(medio.url)) return;
+    _vistos.add(medio);
+
+    // un archivo entero es lo que buscamos: en cuanto aparece, terminamos
+    final mejor = mejorCapturado(_vistos, paraAudio: _paraAudio);
+    if (mejor != null && mejor.esArchivoEntero) _terminarCon(mejor);
   }
 
   Future<void> _terminarCon(MedioCapturado medio) async {
@@ -163,87 +202,39 @@ class CapturadorOculto extends ChangeNotifier {
     fin.complete(CapturaOculta(
       url: medio.url,
       titulo: await _titulo(),
-      cookies: await _cookies(),
+      cookies: await NavegadorCaudal.cookiesDe(_urlActual),
+      candidatas: candidatasOrdenadas(_vistos, paraAudio: _paraAudio)
+          .map((m) => m.url)
+          .toList(),
     ));
   }
 
   Future<CapturaOculta> _loMejorQueTengamos() async {
-    final mejor = mejorCapturado(_vistos, paraAudio: _paraAudio);
-    if (mejor == null) return const CapturaOculta();
+    final ordenadas = candidatasOrdenadas(_vistos, paraAudio: _paraAudio);
+    if (ordenadas.isEmpty) return const CapturaOculta();
     return CapturaOculta(
-      url: mejor.url,
+      url: ordenadas.first.url,
       titulo: await _titulo(),
-      cookies: await _cookies(),
+      cookies: await NavegadorCaudal.cookiesDe(_urlActual),
+      candidatas: ordenadas.map((m) => m.url).toList(),
     );
   }
 
   Future<String> _titulo() async {
     try {
-      return (await _web?.getTitle()) ?? '';
+      return (await _navegador?.webViewController?.getTitle()) ?? '';
     } catch (_) {
       return '';
     }
   }
 
-  Future<String> _cookies() async {
-    try {
-      final r = await _web?.runJavaScriptReturningResult('document.cookie');
-      return r
-              ?.toString()
-              .replaceAll(RegExp(r'^"|"$'), '')
-              .replaceAll(r'\"', '"')
-              .trim() ??
-          '';
-    } catch (_) {
-      return '';
-    }
-  }
-
-  @override
-  void dispose() {
+  Future<void> cerrar() async {
     _insistir?.cancel();
-    super.dispose();
-  }
-}
-
-/// El navegador oculto, metido en la pantalla sin que se note.
-///
-/// Tiene que estar montado de verdad: un WebView fuera del arbol no ejecuta
-/// JavaScript en Android, y entonces no veriamos pasar nada.
-class NavegadorOculto extends StatefulWidget {
-  const NavegadorOculto({super.key, required this.capturador});
-
-  final CapturadorOculto capturador;
-
-  @override
-  State<NavegadorOculto> createState() => _NavegadorOcultoState();
-}
-
-class _NavegadorOcultoState extends State<NavegadorOculto> {
-  @override
-  void initState() {
-    super.initState();
-    // se deja listo desde el arranque, para que cuando haga falta ya lleve
-    // rato en pantalla y responda a la primera
-    widget.capturador.preparar();
-    WidgetsBinding.instance.addPostFrameCallback((_) {
-      widget.capturador.marcarMontado();
-    });
-  }
-
-  @override
-  Widget build(BuildContext context) {
-    return ListenableBuilder(
-      listenable: widget.capturador,
-      builder: (context, _) {
-        final c = widget.capturador.controlador;
-        if (c == null) return const SizedBox.shrink();
-        return SizedBox(
-          width: 1,
-          height: 1,
-          child: Opacity(opacity: 0, child: WebViewWidget(controller: c)),
-        );
-      },
-    );
+    try {
+      await _navegador?.dispose();
+    } catch (_) {
+      // si ya estaba cerrado, da igual
+    }
+    _navegador = null;
   }
 }

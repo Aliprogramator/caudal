@@ -135,11 +135,13 @@ void encolarYAvisar(
   String autor = '',
   String miniatura = '',
   String urlMedia = '',
+  List<String> candidatas = const [],
   String cookies = '',
 }) {
   gestor.encolar(
     url: url,
     urlMedia: urlMedia,
+    candidatas: candidatas,
     cookies: cookies,
     tipo: tipo,
     calidad: calidad,
